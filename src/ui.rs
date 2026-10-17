@@ -751,8 +751,11 @@ fn fields_section(title: &str, pairs: Vec<(&str, &str)>, options: BodyOptions) -
             format!("{}: ", name),
             Style::default().fg(Color::LightCyan).bold(),
         )];
-        if field.base64 {
-            label.push(Span::styled("[base64] ", Style::default().fg(Color::LightGreen)));
+        if let Some(encoding) = field.encoding {
+            label.push(Span::styled(
+                format!("[{}] ", encoding.label()),
+                Style::default().fg(Color::LightGreen),
+            ));
         }
         // Multi-line values (e.g. a decoded, pretty printed SAML assertion) go below the name
         if field.text.contains('\n') {

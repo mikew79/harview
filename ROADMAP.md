@@ -135,11 +135,12 @@ Delivered in three steps, each building and passing tests before the next:
 
 The SAML HTTP-Redirect binding sends the AuthnRequest in the URL as `SAMLRequest`: the XML is raw-DEFLATE compressed, then base64- and URL-encoded. Phase 1 decodes the IdP's `SAMLResponse` (a form post, base64 only), but a `SAMLRequest` currently decodes to compressed binary and is left encoded, so the request that started the login can't be read or searched. Found in the real captures: 2 `SAMLRequest` query parameters in each of `anglogold.har` and `chromewebdata.har`, all inflating to XML.
 
-- [ ] Add `flate2` as a direct dependency (already in the build via `syntect`)
-- [ ] In the decode pipeline, when base64 yields binary, try raw-DEFLATE inflating it; keep the result only if it's readable text, the same rule as base64. This matters: in the captures two `sso_nonce` values also "inflated", to binary noise
-- [ ] Applies to query parameters, form fields and whole bodies; inflated XML is pretty printed and highlighted, and found by `/` and `f` like any decoded content
-- [ ] Decoded fields tagged `[deflate+base64]` instead of `[base64]`
-- [ ] Synthetic `SAMLRequest` fixture; unit tests for inflating, the readable-text rule, and a corrupt stream
+- [x] Add `flate2` as a direct dependency (already in the build via `syntect`, same version, pure-Rust backend)
+- [x] In the decode pipeline, when base64 yields binary, try raw-DEFLATE inflating it; keep the result only if it's readable text, the same rule as base64. This matters: in the captures two `sso_nonce` values also "inflated", to binary noise, and now correctly stay encoded
+- [x] Only a complete stream that uses up exactly all of the input counts: testing showed a truncated stream otherwise inflates to partial output (`<a><b>x<`) with no error, and damaged data can stop early on a valid-looking end (`<a8`). Inflated output is capped at 10MB against decompression bombs
+- [x] Applies to query parameters, form fields and whole bodies; inflated XML is pretty printed and highlighted, and found by `/` and `f` like any decoded content (e.g. `/param:AuthnRequest`), and exported decoded
+- [x] Decoded fields tagged `[deflate+base64]` instead of `[base64]`
+- [x] Synthetic `SAMLRequest` redirect fixture (entry 12 of `sample.har`); unit tests for inflating, the readable-text rule, binary output, truncated and damaged streams, the size cap, and filtering. Verified on the real captures: all 4 `SAMLRequest`s inflate to a `<samlp:AuthnRequest>`
 
 ### Phase 8 — Copy as curl / bash script
 

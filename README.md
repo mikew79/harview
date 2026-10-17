@@ -75,7 +75,7 @@ TUI can be controlled with the following keys:
 | `Tab` / `Shift-Tab` | Next / previous tab |
 | `p` | Toggle pretty printing (JSON, XML, HTML) |
 | `s` | Toggle syntax highlighting (JSON / XML up to 200KB, JavaScript / CSS / HTML up to 32KB) |
-| `x` | Toggle decoding: base64 bodies (binary is shown as a hex dump), and URL-encoded / base64 form fields and query parameters such as a `SAMLResponse` |
+| `x` | Toggle decoding: base64 bodies (binary is shown as a hex dump), and URL-encoded / base64 / deflate-compressed form fields and query parameters such as a SAML `SAMLResponse` or `SAMLRequest` |
 | `J` / `K`, `PgDn` / `PgUp` | Scroll the preview |
 | `/` | Filter entries with a query (see below) |
 | `f` | Find in the preview, without filtering the table |
