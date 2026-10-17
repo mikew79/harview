@@ -31,8 +31,9 @@ Existing keys keep their meaning. New keys are marked ✚.
 | ✚ `5` / `?` | Help tab |
 | ✚ `Tab` / `Shift-Tab` | Next / previous tab |
 | ✚ `/` | Search / filter (see query language below) |
+| ✚ `f` | Find in preview (doesn't filter the table) |
 | ✚ `n` / `N` | Next / previous match in preview |
-| ✚ `Esc` | Clear search, close popup |
+| ✚ `Esc` | Clear find, then search; close popup |
 | ✚ `s` | Toggle syntax highlighting |
 | ✚ `p` | Toggle pretty printing |
 | ✚ `x` | Toggle base64 decoding |
@@ -74,10 +75,14 @@ Structure that later phases plug into. No user-visible change apart from the Hel
 
 The riskiest phase: introduces a filtered view, which changes how the selection is tracked everywhere.
 
-- [ ] Add `regex`
-- [ ] `App.visible: Vec<usize>`; `index` becomes a position in it; table, preview and export look up entries through it (land this on its own first)
-- [ ] `/` opens the input bar, `Enter` applies, `Esc` clears; regex compiled on `Enter`, not per keystroke
-- [ ] Query parser (terms are ANDed, `!` negates a term):
+Delivered in three steps, each building and passing tests before the next:
+**(1)** filtered view, **(2)** `/` filter and query language, **(3)** highlighting, `n` / `N` and find in preview.
+
+- [x] Add `regex`
+- [x] `App.visible: Vec<usize>`; `index` becomes a position in it; table, preview and export look up entries through it (land this on its own first)
+- [x] `/` opens the input bar, `Enter` applies, `Esc` clears; regex compiled on `Enter`, not per keystroke; invalid regex keeps the input open with the error shown
+- [x] Smart case: case-insensitive unless the pattern contains an uppercase letter
+- [x] Query parser (terms are ANDed, `!` negates a term):
   ```
   token                         regex matched anywhere (URL, headers, bodies)
   url:/api/v\d+  host:example   field regex
@@ -87,11 +92,15 @@ The riskiest phase: introduces a filtered view, which changes how the selection 
   method:POST
   size:>100k  dur:>500ms        size / duration with units
   ```
-- [ ] Bodies, form fields and query parameters are searched in decoded form (base64 included)
-- [ ] Matches highlighted in table rows and preview lines
-- [ ] `n` / `N` jump between matches in the preview (scrolls to the match)
-- [ ] Status bar shows the active query and `matched / total`
-- [ ] Unit tests: parser (each field, units, comparisons, negation, invalid regex), matching
+  Also `param:` (decoded query parameters and form fields) and `type:` (response content type). Sizes use decimal units, like the table
+- [x] Bodies, form fields and query parameters are searched in decoded form (base64 included), whatever the `x` setting. Decoded search text is built lazily on the first search and cached
+- [x] When the filter matched decoded content but `x` is off (so nothing is highlighted), the status bar says so
+- [x] Matches highlighted in table rows (domain, path) and preview lines; the filter's positive regex terms are combined into one highlight pattern
+- [x] `n` / `N` jump between individual matches in the preview (several per line count separately), scrolling to the wrapped row the match is on, so matches deep inside a minified line are reachable
+- [x] After filtering, the preview switches to the first tab with a match; toggling `x` / `p` re-runs this, so decoding reveals the match. The status bar shows `match 2/5`, which other tab has matches, or that `x` is needed
+- [x] **Find in preview** (`f`): searches only what the preview currently shows (after decoding / pretty printing, e.g. a decoded SAML assertion) without filtering the table; shares highlighting and `n` / `N`. `Esc` clears find first, then the filter. Moved here from the backlog
+- [x] Status bar shows the active query and `matched / total`
+- [x] Unit tests: parser (each field, units, comparisons, negation, quoting, invalid input), matching against decoded content, smart case, highlighting (span splitting, multibyte), wrapped-row calculation, input editing, filter / find state, key handling
 
 ### Phase 3 — Syntax highlighting
 
@@ -101,6 +110,7 @@ The riskiest phase: introduces a filtered view, which changes how the selection 
 - [ ] Skipped above 200KB with a status bar hint to use `b`
 - [ ] syntect styles converted to ratatui spans; search highlighting layered on top
 - [ ] Cache the wrapped-line count per width so redrawing huge bodies stays fast
+- [ ] With a filter active, moving between entries costs ~25ms on a 19MB HAR, mostly from rendering the other tabs to find which one has a match; cache rendered tab content or search the plain text instead
 - [ ] Unit tests: language selection, size cut-off
 
 ### Phase 4 — External pager
@@ -134,5 +144,4 @@ The riskiest phase: introduces a filtered view, which changes how the selection 
 
 Ideas that came up during development. Not scheduled into a phase yet.
 
-- [ ] **Find in preview.** Search *within* the content currently shown in the preview pane, including decoded and pretty printed content such as a base64 `SAMLResponse` expanded into a SAML assertion. Separate from the phase 2 search, which filters the entries table: this one jumps between matches inside a single entry's preview (e.g. `Ctrl-F` or `/` while the preview is focused, with `n` / `N`), so the text being searched is exactly what's on screen after decoding. Could share phase 2's regex compilation and match highlighting
 - [ ] **Inflate deflate-compressed values**, e.g. a SAML HTTP-Redirect `SAMLRequest` in a query string (raw DEFLATE, then base64, then URL-encoding). Would need the `flate2` crate
