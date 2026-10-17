@@ -15,6 +15,8 @@ use std::borrow::Cow;
 pub struct BodyOptions {
     pub pretty: bool,
     pub decode: bool,
+    /// Syntax highlighting; applied by the UI, `process` ignores it
+    pub highlight: bool,
 }
 
 impl Default for BodyOptions {
@@ -22,6 +24,7 @@ impl Default for BodyOptions {
         Self {
             pretty: true,
             decode: false,
+            highlight: true,
         }
     }
 }
@@ -414,6 +417,7 @@ mod tests {
     const DECODE: BodyOptions = BodyOptions {
         pretty: true,
         decode: true,
+        highlight: false,
     };
 
     fn pretty_text(text: &str, mime_type: &str) -> String {
@@ -443,6 +447,7 @@ mod tests {
         let options = BodyOptions {
             pretty: false,
             decode: false,
+            highlight: false,
         };
 
         let result = process(&body(Some(raw), Some("application/json")), options);
@@ -629,6 +634,7 @@ mod tests {
     const DECODE_RAW: BodyOptions = BodyOptions {
         pretty: false,
         decode: true,
+        highlight: false,
     };
 
     #[test]

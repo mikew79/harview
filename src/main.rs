@@ -4,6 +4,7 @@ mod event;
 mod handler;
 mod har;
 mod search;
+mod syntax;
 mod tui;
 mod ui;
 use anyhow::Context;

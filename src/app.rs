@@ -161,6 +161,16 @@ pub struct PreviewCache {
     pub matches: Vec<(usize, usize)>,
     /// When this tab has no matches: the first other tab that does
     pub match_elsewhere: Option<TabBarState>,
+    /// Wrapped layout for the last width rendered at
+    pub layout: Option<WrappedLayout>,
+}
+
+/// Row on which each preview line starts once wrapped at `width`, plus a final entry holding
+/// the total, so only the lines on screen need rendering
+#[derive(Debug)]
+pub struct WrappedLayout {
+    pub width: u16,
+    pub starts: Vec<usize>,
 }
 
 impl App {
@@ -420,6 +430,10 @@ impl App {
         self.body_options.pretty = !self.body_options.pretty;
         self.preview_scroll = 0;
         self.rejump_after_content_change();
+    }
+
+    pub fn toggle_highlight(&mut self) {
+        self.body_options.highlight = !self.body_options.highlight;
     }
 
     pub fn toggle_decode(&mut self) {

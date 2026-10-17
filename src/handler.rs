@@ -13,6 +13,7 @@ pub enum Command {
     PrevTab,
     TogglePretty,
     ToggleDecode,
+    ToggleHighlight,
     StartInput(InputKind),
     NextMatch,
     PrevMatch,
@@ -44,6 +45,7 @@ impl Command {
             Self::PrevTab => app.prev_tab(),
             Self::TogglePretty => app.toggle_pretty(),
             Self::ToggleDecode => app.toggle_decode(),
+            Self::ToggleHighlight => app.toggle_highlight(),
             Self::StartInput(kind) => app.start_input(*kind),
             Self::NextMatch => app.jump_to_match(MatchJump::Next),
             Self::PrevMatch => app.jump_to_match(MatchJump::Prev),
@@ -88,6 +90,7 @@ pub const KEY_HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             ("p", "Toggle pretty printing (JSON, XML, HTML)"),
             ("x", "Toggle decoding: base64 bodies, URL / base64 form and query values"),
+            ("s", "Toggle syntax highlighting (JSON/XML to 200KB, JS/CSS/HTML to 32KB)"),
         ],
     ),
     (
@@ -177,6 +180,7 @@ fn normal_mode_keys(key_event: KeyEvent) -> Option<Command> {
         KeyCode::BackTab => Some(Command::PrevTab),
         KeyCode::Char('p') => Some(Command::TogglePretty),
         KeyCode::Char('x') => Some(Command::ToggleDecode),
+        KeyCode::Char('s') => Some(Command::ToggleHighlight),
         KeyCode::Char('/') => Some(Command::StartInput(InputKind::Filter)),
         KeyCode::Char('f') => Some(Command::StartInput(InputKind::Find)),
         KeyCode::Char('n') => Some(Command::NextMatch),
@@ -278,6 +282,13 @@ mod tests {
         let command = handle_key_events(ctrl_c, FILTER_INPUT);
 
         assert_eq!(command, Some(Command::Quit));
+    }
+
+    #[test]
+    fn handle_key_events_s_toggles_highlight() {
+        let command = handle_key_events(key(KeyCode::Char('s')), Mode::Normal);
+
+        assert_eq!(command, Some(Command::ToggleHighlight));
     }
 
     #[test]

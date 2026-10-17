@@ -26,6 +26,7 @@ use regex::{Regex, RegexBuilder};
 const SEARCH_OPTIONS: BodyOptions = BodyOptions {
     pretty: false,
     decode: true,
+    highlight: false,
 };
 
 /// Decoded, searchable text of one entry; built once, on the first search

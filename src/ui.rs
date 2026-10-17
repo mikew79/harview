@@ -1,7 +1,8 @@
-use crate::app::{App, InputKind, MatchJump, Mode, PreviewCache, TabBarState};
+use crate::app::{App, InputKind, MatchJump, Mode, PreviewCache, TabBarState, WrappedLayout};
 use crate::body::{self, Body, BodyOptions, Processed};
 use crate::handler::KEY_HELP;
 use crate::har::{Entry, Header};
+use crate::syntax::{self, Language};
 use ratatui::{prelude::*, widgets::*};
 use regex::Regex;
 
@@ -116,6 +117,7 @@ fn render_normal_status(app: &App, area: Rect, buf: &mut Buffer) {
     right.extend([
         flag("pretty ", app.body_options.pretty),
         flag("decode ", app.body_options.decode),
+        flag("syntax ", app.body_options.highlight),
         Span::raw(format!(" {} ", count)),
         Span::styled(" ?: help  q: quit ", Style::default().fg(Color::DarkGray)),
     ]);
@@ -200,7 +202,7 @@ fn ensure_preview_cache(app: &mut App) {
     if app.preview_cache.as_ref().map(|cache| cache.key) == Some(key) {
         return;
     }
-    let lines = preview_lines(app, app.tabbar_state);
+    let lines = preview_lines(app, app.tabbar_state, app.body_options);
     let (lines, matches) = match app.highlight() {
         Some(regex) => highlight_lines(lines, regex),
         None => (lines, Vec::new()),
@@ -216,8 +218,101 @@ fn ensure_preview_cache(app: &mut App) {
         lines,
         matches,
         match_elsewhere,
+        layout: None,
     });
     app.match_cursor = None;
+}
+
+fn wrapped_layout(cache: &mut PreviewCache, width: u16) -> &WrappedLayout {
+    if cache.layout.as_ref().map(|layout| layout.width) != Some(width) {
+        let mut starts = Vec::with_capacity(cache.lines.len() + 1);
+        let mut row = 0;
+        starts.push(row);
+        for line in &cache.lines {
+            row += wrapped_height(line, width);
+            starts.push(row);
+        }
+        cache.layout = Some(WrappedLayout { width, starts });
+    }
+    cache.layout.get_or_insert_with(|| unreachable!("layout just built"))
+}
+
+/// The lines needed to fill `height` rows from wrapped row `scroll`, and the row offset into
+/// the first of them; rendering just these avoids copying a whole huge body every frame
+fn visible_window(
+    lines: &[Line<'static>],
+    starts: &[usize],
+    scroll: usize,
+    height: usize,
+    width: u16,
+) -> (Vec<Line<'static>>, u16) {
+    let width = width.max(1) as usize;
+    let line_starts = &starts[..lines.len()];
+    let first = line_starts
+        .partition_point(|&start| start <= scroll)
+        .saturating_sub(1);
+    let end = line_starts.partition_point(|&start| start < scroll + height);
+    let offset = scroll.saturating_sub(line_starts.get(first).copied().unwrap_or(0));
+
+    let mut window = Vec::new();
+    let mut paragraph_offset = 0;
+    for (position, line) in lines.get(first..end.max(first)).unwrap_or_default().iter().enumerate() {
+        let skip_rows = if position == 0 { offset } else { 0 };
+        if is_hard_wrapped(line) {
+            // Cut out just the visible rows, each exactly `width` bytes (ASCII) long
+            let len = line_len(line);
+            let rows = len.div_ceil(width);
+            let take = rows.saturating_sub(skip_rows).min(height);
+            window.extend((skip_rows..skip_rows + take).map(|row| {
+                slice_line(line, row * width, ((row + 1) * width).min(len))
+            }));
+        } else {
+            if position == 0 {
+                paragraph_offset = offset;
+            }
+            window.push(line.clone());
+        }
+    }
+    (window, paragraph_offset.min(u16::MAX as usize) as u16)
+}
+
+/// Lines at least this long that are plain ASCII (typically minified code) are wrapped at
+/// exactly the preview width rather than at word boundaries: their height is then simple
+/// arithmetic and only the visible rows are cut out. Word-wrapping a multi-megabyte minified
+/// line took ~175ms
+const HARD_WRAP_MIN_BYTES: usize = 10_000;
+
+fn line_len(line: &Line) -> usize {
+    line.spans.iter().map(|span| span.content.len()).sum()
+}
+
+fn is_hard_wrapped(line: &Line) -> bool {
+    line_len(line) >= HARD_WRAP_MIN_BYTES && line.spans.iter().all(|span| span.content.is_ascii())
+}
+
+/// Bytes `start..end` of `line`, keeping the span styles
+fn slice_line(line: &Line<'static>, start: usize, end: usize) -> Line<'static> {
+    let mut spans = Vec::new();
+    let mut offset = 0;
+    for span in &line.spans {
+        let len = span.content.len();
+        let (from, to) = (start.max(offset), end.min(offset + len));
+        if from < to {
+            spans.push(Span::styled(
+                span.content[from - offset..to - offset].to_string(),
+                span.style,
+            ));
+        }
+        offset += len;
+        if offset >= end {
+            break;
+        }
+    }
+    Line {
+        spans,
+        style: line.style,
+        alignment: line.alignment,
+    }
 }
 
 pub fn render_preview(app: &mut App, area: Rect, buf: &mut Buffer) {
@@ -238,28 +333,40 @@ pub fn render_preview(app: &mut App, area: Rect, buf: &mut Buffer) {
 
     Widget::render(tabbar(app.tabbar_state), layout[0], buf);
 
-    let lines = app
-        .preview_cache
-        .as_ref()
-        .map(|cache| cache.lines.clone())
-        .unwrap_or_default();
-    let content = Paragraph::new(lines).wrap(Wrap { trim: false });
-
-    // Count rows after wrapping, so a single long line (e.g. a minified body) is still scrollable.
-    // Clamp here too so scrolling back up responds immediately after overshooting.
-    let total = content.line_count(inner.width);
-    let max_scroll = total
-        .saturating_sub(inner.height as usize)
-        .min(u16::MAX as usize) as u16;
-    app.preview_scroll = app.preview_scroll.min(max_scroll);
+    let height = inner.height as usize;
+    let (window, offset, total) = match app.preview_cache.as_mut() {
+        Some(cache) => {
+            // Rows after wrapping, so a single long line (e.g. a minified body) is still
+            // scrollable. Clamp here too so scrolling back up responds immediately after
+            // overshooting.
+            wrapped_layout(cache, inner.width);
+            let starts = cache
+                .layout
+                .as_ref()
+                .map_or(&[0][..], |layout| layout.starts.as_slice());
+            let total = starts.last().copied().unwrap_or(0);
+            let max_scroll = total.saturating_sub(height).min(u16::MAX as usize) as u16;
+            app.preview_scroll = app.preview_scroll.min(max_scroll);
+            let (window, offset) = visible_window(
+                &cache.lines,
+                starts,
+                app.preview_scroll as usize,
+                height,
+                inner.width,
+            );
+            (window, offset, total)
+        }
+        None => (Vec::new(), 0, 0),
+    };
 
     let position = format!(
         " {}/{} | J/K PgUp/PgDn: scroll ",
-        (app.preview_scroll as usize + inner.height as usize).min(total),
+        (app.preview_scroll as usize + height).min(total),
         total
     );
-    let content = content
-        .scroll((app.preview_scroll, 0))
+    let content = Paragraph::new(window)
+        .wrap(Wrap { trim: false })
+        .scroll((offset, 0))
         .block(block.title_bottom(Line::from(position).right_aligned()));
 
     Widget::render(content, layout[1], buf);
@@ -303,9 +410,10 @@ fn resolve_match_jump(app: &mut App, jump: MatchJump, width: u16) {
     };
     app.match_cursor = Some(cursor);
 
-    if let Some(cache) = &app.preview_cache {
+    if let Some(cache) = app.preview_cache.as_mut() {
         let (line, match_end) = cache.matches[cursor];
-        let row = match_row(&cache.lines, line, match_end, width);
+        let line_start = wrapped_layout(cache, width).starts[line];
+        let row = match_row(&cache.lines[line], line_start, match_end, width);
         app.preview_scroll = row
             .saturating_sub(MATCH_CONTEXT_ROWS)
             .min(u16::MAX as usize) as u16;
@@ -318,34 +426,43 @@ fn first_other_tab_with_match(app: &App) -> Option<TabBarState> {
         .into_iter()
         .filter(|tab| *tab != TabBarState::Help && *tab != app.tabbar_state)
         .find(|tab| {
-            preview_lines(app, *tab)
+            // Plain rendering: pretty printing and highlighting large bodies is the costly part
+            let plain = BodyOptions {
+                pretty: false,
+                highlight: false,
+                ..app.body_options
+            };
+            preview_lines(app, *tab, plain)
                 .iter()
                 .any(|line| regex.is_match(&line_text(line)))
         })
 }
 
-fn wrapped_height(line: Line<'static>, width: u16) -> usize {
-    Paragraph::new(line)
+fn wrapped_height(line: &Line<'static>, width: u16) -> usize {
+    let width = width.max(1);
+    if is_hard_wrapped(line) {
+        return line_len(line).div_ceil(width as usize).max(1);
+    }
+    // Most lines fit, and measuring is much cheaper than wrapping a copy
+    if line.width() <= width as usize {
+        return 1;
+    }
+    Paragraph::new(line.clone())
         .wrap(Wrap { trim: false })
         .line_count(width)
         .max(1)
 }
 
-/// Row (after wrapping at `width`) on which logical line `index` starts
-fn wrapped_row(lines: &[Line<'static>], index: usize, width: u16) -> usize {
-    lines[..index.min(lines.len())]
-        .iter()
-        .map(|line| wrapped_height(line.clone(), width))
-        .sum()
-}
-
-/// Row on which a match ending at byte `match_end` of line `index` is shown. Wrapping the text
-/// up to the match end approximates the full line's wrapping (it can be one row early), which
-/// the context rows kept above a match absorb
-fn match_row(lines: &[Line<'static>], index: usize, match_end: usize, width: u16) -> usize {
-    let text = lines.get(index).map(line_text).unwrap_or_default();
+/// Row on which a match ending at byte `match_end` of `line` (starting on row `line_start`) is
+/// shown. Wrapping the text up to the match end approximates the full line's wrapping (it can
+/// be one row early), which the context rows kept above a match absorb
+fn match_row(line: &Line<'static>, line_start: usize, match_end: usize, width: u16) -> usize {
+    if is_hard_wrapped(line) {
+        return line_start + match_end.saturating_sub(1) / width.max(1) as usize;
+    }
+    let text = line_text(line);
     let prefix = text.get(..match_end).unwrap_or(&text).to_string();
-    wrapped_row(lines, index, width) + wrapped_height(Line::from(prefix), width) - 1
+    line_start + wrapped_height(&Line::from(prefix), width) - 1
 }
 
 fn line_text(line: &Line) -> String {
@@ -427,16 +544,16 @@ fn highlight_lines(
     (lines, matches)
 }
 
-fn preview_lines(app: &App, tab: TabBarState) -> Vec<Line<'static>> {
+fn preview_lines(app: &App, tab: TabBarState, options: BodyOptions) -> Vec<Line<'static>> {
     if tab == TabBarState::Help {
         return help_lines();
     }
     match app.selected_entry().and_then(|entry| app.har.log.entries.get(entry)) {
         Some(entry) => match tab {
-            TabBarState::Headers => headers_lines(entry, app.body_options),
+            TabBarState::Headers => headers_lines(entry, options),
             TabBarState::Cookies => cookies_lines(entry),
-            TabBarState::Request => request_lines(entry, app.body_options),
-            TabBarState::Response => response_lines(entry, app.body_options),
+            TabBarState::Request => request_lines(entry, options),
+            TabBarState::Response => response_lines(entry, options),
             TabBarState::Help => help_lines(),
         },
         None => vec![placeholder("No entry selected")],
@@ -531,7 +648,12 @@ fn fields_section(title: &str, pairs: Vec<(&str, &str)>, options: BodyOptions) -
         // Multi-line values (e.g. a decoded, pretty printed SAML assertion) go below the name
         if field.text.contains('\n') {
             lines.push(Line::from(label));
-            lines.extend(field.text.lines().map(|line| Line::from(format!("  {}", line))));
+            let value_lines = text_lines(&field.text, Language::sniff(&field.text), options);
+            lines.extend(value_lines.into_iter().map(|line| {
+                let mut spans = vec![Span::raw("  ")];
+                spans.extend(line.spans);
+                Line::from(spans)
+            }));
         } else {
             label.push(Span::raw(field.text.into_owned()));
             lines.push(Line::from(label));
@@ -672,7 +794,11 @@ fn request_lines(entry: &Entry, options: BodyOptions) -> Vec<Line<'static>> {
                 encoding: None,
                 mime_type: Some(&post_data.mime_type),
             };
-            lines.extend(processed_lines(body::process(&request_body, options)));
+            lines.extend(processed_lines(
+                body::process(&request_body, options),
+                Language::from_mime(&post_data.mime_type),
+                options,
+            ));
         }
         None => lines.push(placeholder("(no request body)")),
     }
@@ -708,13 +834,43 @@ fn response_lines(entry: &Entry, options: BodyOptions) -> Vec<Line<'static>> {
         encoding: content.encoding.as_deref(),
         mime_type: content.mime_type.as_deref(),
     };
-    lines.extend(processed_lines(body::process(&response_body, options)));
+    lines.extend(processed_lines(
+        body::process(&response_body, options),
+        content.mime_type.as_deref().and_then(Language::from_mime),
+        options,
+    ));
     lines
 }
 
-fn processed_lines(processed: Processed) -> Vec<Line<'static>> {
+/// Body text as lines, syntax highlighted when on, the language is known (from the MIME type,
+/// else guessed from the content) and the text is small enough
+fn text_lines(text: &str, language: Option<Language>, options: BodyOptions) -> Vec<Line<'static>> {
+    let plain = || text.lines().map(|line| Line::from(line.to_string())).collect();
+    if !options.highlight {
+        return plain();
+    }
+    let Some(language) = language.or_else(|| Language::sniff(text)) else {
+        return plain();
+    };
+    if text.len() > language.max_highlight_bytes() {
+        let mut lines = vec![placeholder(&format!(
+            "(syntax highlighting skipped: {} body is over {}KB)",
+            language.name(),
+            language.max_highlight_bytes() / 1024
+        ))];
+        lines.extend(plain());
+        return lines;
+    }
+    syntax::highlight(text, language).unwrap_or_else(plain)
+}
+
+fn processed_lines(
+    processed: Processed,
+    language: Option<Language>,
+    options: BodyOptions,
+) -> Vec<Line<'static>> {
     match processed {
-        Processed::Text(text) => text.lines().map(|line| Line::from(line.to_string())).collect(),
+        Processed::Text(text) => text_lines(&text, language, options),
         Processed::Empty => vec![placeholder("(empty)")],
         Processed::NotCaptured => vec![placeholder("(body not captured in HAR)")],
         Processed::Encoded { encoding, len } => vec![placeholder(&format!(
@@ -841,24 +997,181 @@ mod tests {
         assert_eq!(matches, vec![(0, 1), (2, 2), (2, 4)]);
     }
 
-    #[test]
-    fn match_row_finds_row_of_match_inside_wrapped_line() {
-        let lines = vec![
-            Line::from("intro"),                     // row 0
-            Line::from("aaaa bbbb cccc dddd tgt"), // rows 1-5 at width 5, `tgt` on row 5
-        ];
-
-        assert_eq!(match_row(&lines, 1, 23, 5), 5);
+    fn cache_with(lines: Vec<Line<'static>>) -> PreviewCache {
+        PreviewCache {
+            key: crate::app::PreviewKey {
+                entry: None,
+                tab: TabBarState::Headers,
+                body_options: BodyOptions::default(),
+                highlight_generation: 0,
+            },
+            lines,
+            matches: Vec::new(),
+            match_elsewhere: None,
+            layout: None,
+        }
     }
 
     #[test]
-    fn wrapped_row_counts_wrapped_and_empty_lines() {
-        let lines = vec![
+    fn match_row_finds_row_of_match_inside_wrapped_line() {
+        // rows 1-5 at width 5, `tgt` on row 5
+        let line = Line::from("aaaa bbbb cccc dddd tgt");
+
+        assert_eq!(match_row(&line, 1, 23, 5), 5);
+    }
+
+    #[test]
+    fn wrapped_layout_counts_wrapped_and_empty_lines() {
+        let mut cache = cache_with(vec![
             Line::from("aaaa bbbb cccc"), // 3 rows at width 5
             Line::default(),              // 1 row
-            Line::from("target"),
-        ];
+            Line::from("target"),         // 2 rows
+        ]);
 
-        assert_eq!(wrapped_row(&lines, 2, 5), 4);
+        let starts = &wrapped_layout(&mut cache, 5).starts;
+
+        assert_eq!(starts, &vec![0, 3, 4, 6]);
+    }
+
+    #[test]
+    fn wrapped_layout_rebuilds_for_new_width() {
+        let mut cache = cache_with(vec![Line::from("aaaa bbbb cccc")]);
+        wrapped_layout(&mut cache, 5);
+
+        let starts = &wrapped_layout(&mut cache, 20).starts;
+
+        assert_eq!(starts, &vec![0, 1]);
+    }
+
+    #[test]
+    fn visible_window_starts_inside_a_wrapped_line() {
+        let lines: Vec<Line<'static>> = ["a", "b", "c", "d"].map(Line::from).to_vec();
+        let starts = [0, 1, 4, 5, 6]; // line b wraps to 3 rows
+
+        let (window, offset) = visible_window(&lines, &starts, 2, 3, 80);
+
+        // rows 2..5: the rest of b (offset 1 into it), then c
+        assert_eq!(
+            (window.iter().map(line_text).collect::<Vec<_>>(), offset),
+            (vec!["b".to_string(), "c".to_string()], 1)
+        );
+    }
+
+    fn long_ascii_line() -> Line<'static> {
+        // 25,000 bytes over two spans, so slicing has to cross a span boundary
+        Line::from(vec![
+            Span::styled("a".repeat(450), Style::default().fg(Color::Red)),
+            Span::raw("b".repeat(24_550)),
+        ])
+    }
+
+    #[test]
+    fn wrapped_height_long_ascii_line_is_hard_wrapped() {
+        assert_eq!(wrapped_height(&long_ascii_line(), 100), 250);
+    }
+
+    #[test]
+    fn is_hard_wrapped_needs_long_ascii_text() {
+        let long_unicode = Line::from("é".repeat(HARD_WRAP_MIN_BYTES));
+
+        assert_eq!(
+            (
+                is_hard_wrapped(&long_ascii_line()),
+                is_hard_wrapped(&Line::from("short")),
+                is_hard_wrapped(&long_unicode)
+            ),
+            (true, false, false)
+        );
+    }
+
+    #[test]
+    fn visible_window_cuts_rows_out_of_hard_wrapped_line() {
+        let lines = vec![Line::from("intro"), long_ascii_line()];
+        let starts = [0, 1, 251];
+
+        // rows 5..8 are rows 4..7 of the long line: bytes 400..700
+        let (window, offset) = visible_window(&lines, &starts, 5, 3, 100);
+
+        assert_eq!(
+            (
+                window.iter().map(line_text).collect::<Vec<_>>(),
+                offset,
+                window[0].spans.iter().map(|span| span.style.fg).collect::<Vec<_>>(),
+            ),
+            (
+                vec![
+                    "a".repeat(50) + &"b".repeat(50),
+                    "b".repeat(100),
+                    "b".repeat(100)
+                ],
+                0,
+                vec![Some(Color::Red), None],
+            )
+        );
+    }
+
+    #[test]
+    fn match_row_in_hard_wrapped_line_is_exact() {
+        // match ending at byte 450 is on row 4 of the line (bytes 400..500)
+        assert_eq!(match_row(&long_ascii_line(), 1, 450, 100), 5);
+    }
+
+    #[test]
+    fn visible_window_of_empty_preview_is_empty() {
+        let (window, offset) = visible_window(&[], &[0], 0, 10, 80);
+
+        assert_eq!((window.len(), offset), (0, 0));
+    }
+
+    #[test]
+    fn text_lines_over_limit_skips_highlighting_with_note() {
+        let big = format!("{{\"a\": \"{}\"}}", "x".repeat(Language::Json.max_highlight_bytes()));
+
+        let lines = text_lines(&big, Some(Language::Json), BodyOptions::default());
+
+        assert_eq!(
+            (lines.len(), line_text(&lines[0])),
+            (2, "(syntax highlighting skipped: JSON body is over 200KB)".to_string())
+        );
+    }
+
+    #[test]
+    fn text_lines_javascript_over_its_lower_limit_is_plain() {
+        let script = "var a=1;".repeat(Language::JavaScript.max_highlight_bytes() / 8 + 1);
+
+        let lines = text_lines(&script, Some(Language::JavaScript), BodyOptions::default());
+
+        assert_eq!(
+            line_text(&lines[0]),
+            "(syntax highlighting skipped: JavaScript body is over 32KB)"
+        );
+    }
+
+    #[test]
+    fn text_lines_with_highlight_off_is_plain() {
+        let lines = text_lines(
+            "{\"a\": 1}",
+            Some(Language::Json),
+            BodyOptions {
+                highlight: false,
+                ..BodyOptions::default()
+            },
+        );
+
+        assert_eq!(lines[0].spans.len(), 1);
+    }
+
+    #[test]
+    fn text_lines_with_highlight_on_colours_known_language() {
+        let lines = text_lines("{\"a\": 1}", Some(Language::Json), BodyOptions::default());
+
+        assert!(lines[0].spans.len() > 1);
+    }
+
+    #[test]
+    fn text_lines_unknown_language_is_sniffed() {
+        let lines = text_lines("<a><b>x</b></a>", None, BodyOptions::default());
+
+        assert!(lines[0].spans.len() > 1);
     }
 }
