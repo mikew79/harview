@@ -1,0 +1,6 @@
+/target
+
+# Local HAR captures may contain cookies, tokens and other sensitive data
+/data/
+*.har
+*:Zone.Identifier

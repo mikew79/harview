@@ -1,0 +1,333 @@
+use crate::app::{App, PreviewCache, TabBarState};
+use crate::har::{Entry, Header};
+use ratatui::{prelude::*, widgets::*};
+
+pub fn render(app: &mut App, frame: &mut Frame) {
+    let main_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Fill(1), Constraint::Fill(1)])
+        .split(frame.size());
+
+    render_table(app, main_layout[0], frame.buffer_mut());
+    render_preview(app, main_layout[1], frame.buffer_mut());
+}
+
+pub fn render_table(app: &mut App, area: Rect, buf: &mut Buffer) {
+    let headers = Row::new(vec![
+        Cell::from("Status"),
+        Cell::from("Method"),
+        Cell::from("Domain"),
+        Cell::from("FileName"),
+        Cell::from("ContentType"),
+        Cell::from("     Size  "),
+    ])
+    .style(Style::default().bold().underlined());
+
+    let widths = [
+        Constraint::Length(6),
+        Constraint::Length(6),
+        Constraint::Fill(1),
+        Constraint::Fill(2),
+        Constraint::Length(12),
+        Constraint::Length(12),
+    ];
+
+    let rows = app.table_items.iter().map(|item| item.to_table_row());
+
+    let table = Table::new(rows, widths)
+        .header(headers)
+        .highlight_style(Style::default().reversed())
+        .block(
+            Block::default()
+                .padding(Padding::horizontal(1))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        );
+
+    StatefulWidget::render(table, area, buf, &mut app.table_state);
+}
+
+pub fn render_preview(app: &mut App, area: Rect, buf: &mut Buffer) {
+    let key = (app.get_index(), app.tabbar_state);
+    if app.preview_cache.as_ref().map(|cache| cache.key) != Some(key) {
+        app.preview_cache = Some(PreviewCache {
+            key,
+            lines: preview_lines(app),
+        });
+    }
+    let lines = app
+        .preview_cache
+        .as_ref()
+        .map(|cache| cache.lines.clone())
+        .unwrap_or_default();
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Fill(1)])
+        .split(area);
+
+    Widget::render(tabbar(app.tabbar_state), layout[0], buf);
+
+    let block = Block::default()
+        .padding(Padding::horizontal(1))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray));
+    let inner = block.inner(layout[1]);
+
+    let content = Paragraph::new(lines).wrap(Wrap { trim: false });
+
+    // Count rows after wrapping, so a single long line (e.g. a minified body) is still scrollable.
+    // Clamp here too so scrolling back up responds immediately after overshooting.
+    let total = content.line_count(inner.width);
+    let max_scroll = total
+        .saturating_sub(inner.height as usize)
+        .min(u16::MAX as usize) as u16;
+    app.preview_scroll = app.preview_scroll.min(max_scroll);
+
+    let position = format!(
+        " {}/{} | J/K PgUp/PgDn: scroll ",
+        (app.preview_scroll as usize + inner.height as usize).min(total),
+        total
+    );
+    let content = content
+        .scroll((app.preview_scroll, 0))
+        .block(block.title_bottom(Line::from(position).right_aligned()));
+
+    Widget::render(content, layout[1], buf);
+}
+
+fn preview_lines(app: &App) -> Vec<Line<'static>> {
+    match app.har.log.entries.get(app.get_index()) {
+        Some(entry) => match app.tabbar_state {
+            TabBarState::Headers => headers_lines(entry),
+            TabBarState::Cookies => cookies_lines(entry),
+            TabBarState::Request => request_lines(entry),
+            TabBarState::Response => response_lines(entry),
+        },
+        None => vec![placeholder("No entry selected")],
+    }
+}
+
+fn tabbar(state: TabBarState) -> Tabs<'static> {
+    Tabs::new(vec![
+        " [1] Headers ",
+        " [2] Cookies ",
+        " [3] Request ",
+        " [4] Response ",
+    ])
+    .select(state.to_index())
+    .padding(" ", " ")
+}
+
+fn section(title: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        title.to_string(),
+        Style::default().fg(Color::LightYellow).bold(),
+    ))
+}
+
+fn key_value(name: &str, value: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("{}: ", name),
+            Style::default().fg(Color::LightCyan).bold(),
+        ),
+        Span::raw(value.to_string()),
+    ])
+}
+
+fn placeholder(text: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        text.to_string(),
+        Style::default().fg(Color::DarkGray).italic(),
+    ))
+}
+
+fn pairs_section(title: &str, pairs: Vec<(&str, &str)>) -> Vec<Line<'static>> {
+    let mut lines = vec![section(&format!("{} ({})", title, pairs.len()))];
+    if pairs.is_empty() {
+        lines.push(placeholder("(none)"));
+    }
+    lines.extend(pairs.into_iter().map(|(name, value)| key_value(name, value)));
+    lines.push(Line::default());
+    lines
+}
+
+fn header_pairs(headers: &[Header]) -> Vec<(&str, &str)> {
+    headers
+        .iter()
+        .map(|h| (h.name.as_str(), h.value.as_str()))
+        .collect()
+}
+
+fn opt_ms(value: Option<f64>) -> String {
+    match value {
+        Some(v) if v >= 0.0 => format!("{:.1} ms", v),
+        _ => "-".to_string(),
+    }
+}
+
+/// HAR uses -1 for unknown sizes
+fn opt_bytes(value: Option<i64>) -> String {
+    match value {
+        Some(v) if v >= 0 => format!("{} bytes", v),
+        _ => "-".to_string(),
+    }
+}
+
+fn headers_lines(entry: &Entry) -> Vec<Line<'static>> {
+    let req = &entry.request;
+    let resp = &entry.response;
+    let t = &entry.timings;
+
+    let mut lines = vec![
+        section("General"),
+        key_value("URL", req.url.as_str()),
+        key_value("Method", &req.method),
+        key_value(
+            "Status",
+            &format!("{} {}", resp.status, resp.status_text),
+        ),
+        key_value("HTTP Version", &req.http_version),
+        key_value(
+            "Remote Address",
+            entry.server_ipaddress.as_deref().unwrap_or("-"),
+        ),
+        key_value("Started", &entry.started_date_time),
+        key_value("Total Time", &opt_ms(Some(entry.time))),
+        key_value(
+            "Timings",
+            &format!(
+                "blocked {} | dns {} | connect {} | ssl {} | send {} | wait {} | receive {}",
+                opt_ms(t.blocked),
+                opt_ms(t.dns),
+                opt_ms(t.connect),
+                opt_ms(t.ssl),
+                opt_ms(t.send),
+                opt_ms(t.wait),
+                opt_ms(t.receive)
+            ),
+        ),
+    ];
+    if !resp.redirect_url.is_empty() {
+        lines.push(key_value("Redirect URL", &resp.redirect_url));
+    }
+    lines.push(Line::default());
+
+    lines.extend(pairs_section(
+        "Query Parameters",
+        req.query_string
+            .iter()
+            .map(|q| (q.name.as_str(), q.value.as_str()))
+            .collect(),
+    ));
+    lines.extend(pairs_section("Response Headers", header_pairs(&resp.headers)));
+    lines.extend(pairs_section("Request Headers", header_pairs(&req.headers)));
+    lines
+}
+
+fn cookies_lines(entry: &Entry) -> Vec<Line<'static>> {
+    let mut lines = pairs_section(
+        "Request Cookies",
+        entry
+            .request
+            .cookies
+            .iter()
+            .map(|c| (c.name.as_str(), c.value.as_str()))
+            .collect(),
+    );
+    lines.extend(pairs_section(
+        "Response Cookies",
+        entry
+            .response
+            .cookies
+            .iter()
+            .map(|c| (c.name.as_str(), c.value.as_str()))
+            .collect(),
+    ));
+    lines
+}
+
+fn request_lines(entry: &Entry) -> Vec<Line<'static>> {
+    let req = &entry.request;
+    let mut lines = vec![
+        section("Request"),
+        key_value("Method", &req.method),
+        key_value("Body Size", &opt_bytes(Some(req.body_size))),
+        Line::default(),
+    ];
+
+    match &req.post_data {
+        Some(post_data) => {
+            lines.push(key_value("Content Type", &post_data.mime_type));
+            lines.push(Line::default());
+            if let Some(params) = &post_data.params {
+                lines.extend(pairs_section(
+                    "Form Parameters",
+                    params
+                        .iter()
+                        .map(|p| (p.name.as_str(), p.value.as_str()))
+                        .collect(),
+                ));
+            }
+            lines.push(section("Body"));
+            lines.extend(body_lines(&post_data.text));
+        }
+        None => lines.push(placeholder("(no request body)")),
+    }
+    lines
+}
+
+fn response_lines(entry: &Entry) -> Vec<Line<'static>> {
+    let resp = &entry.response;
+    let content = &resp.content;
+    let mut lines = vec![
+        section("Response"),
+        key_value(
+            "Status",
+            &format!("{} {}", resp.status, resp.status_text),
+        ),
+        key_value(
+            "Content Type",
+            content.mime_type.as_deref().unwrap_or("-"),
+        ),
+        key_value(
+            "Size",
+            &opt_bytes(content.size),
+        ),
+    ];
+    if let Some(encoding) = &content.encoding {
+        lines.push(key_value("Encoding", encoding));
+    }
+    lines.push(Line::default());
+    lines.push(section("Body"));
+
+    match &content.text {
+        Some(text) if content.encoding.as_deref() == Some("base64") => {
+            lines.push(placeholder(&format!(
+                "(base64-encoded body, {} chars - not decoded)",
+                text.len()
+            )));
+        }
+        Some(text) => lines.extend(body_lines(text)),
+        None => lines.push(placeholder("(body not captured in HAR)")),
+    }
+    lines
+}
+
+/// Pretty-prints JSON bodies; anything else is shown as-is.
+fn body_lines(text: &str) -> Vec<Line<'static>> {
+    if text.is_empty() {
+        return vec![placeholder("(empty)")];
+    }
+    let pretty = serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|value| serde_json::to_string_pretty(&value).ok());
+
+    pretty
+        .as_deref()
+        .unwrap_or(text)
+        .lines()
+        .map(|line| Line::from(line.to_string()))
+        .collect()
+}
