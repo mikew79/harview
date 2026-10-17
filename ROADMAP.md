@@ -14,7 +14,8 @@ against the synthetic fixtures in `tests/fixtures/`. Tick items off in the same 
 | New crates | `regex`, `base64`, `quick-xml`, `syntect` (with `default-fancy`, pure Rust, no C dependency). Temp files use `std`, not `tempfile`. |
 | Search behaviour | An active search **filters** the table to matching entries and highlights matches in both panes. `Esc` clears it. |
 | Export targets | File in `./exports/` (git-ignored) **and** clipboard via OSC 52. |
-| External viewer | Moved to the backlog: export (phase 5) covers most of the need without handing the terminal to another program. If added later: `bat` → `batcat` → `$PAGER` → `less`. |
+| External viewer | Won't do (see the end of this file): export (phase 5) covers the need without handing the terminal to another program. |
+| Next phases | Agreed order: 7 deflate decoding (`SAMLRequest`), 8 copy as curl / bash script, 9 faster moves with a filter active. The SAML inspector stays in the backlog until it's scheduled. |
 | Syntax highlighting limit | Per language, to keep the UI responsive: JSON / XML up to 200KB, JavaScript / CSS / HTML up to 32KB (syntect's JS-family grammars cost ~3µs per byte, so 200KB of JS blocked for ~0.6s). Larger bodies are shown plain with a note; export them to view elsewhere. |
 
 ## Key bindings
@@ -130,21 +131,42 @@ Delivered in three steps, each building and passing tests before the next:
 
 - [x] `z` toggles the preview (bottom half) to full screen and back; the table is hidden while maximised and keeps its selection and scroll position, and `j` / `k` still move between entries (the status bar shows which). The preview border shows `z: full screen` / `z: restore`. Help tab and README list the key
 
+### Phase 7 — Deflate decoding (SAML `SAMLRequest`)
+
+The SAML HTTP-Redirect binding sends the AuthnRequest in the URL as `SAMLRequest`: the XML is raw-DEFLATE compressed, then base64- and URL-encoded. Phase 1 decodes the IdP's `SAMLResponse` (a form post, base64 only), but a `SAMLRequest` currently decodes to compressed binary and is left encoded, so the request that started the login can't be read or searched. Found in the real captures: 2 `SAMLRequest` query parameters in each of `anglogold.har` and `chromewebdata.har`, all inflating to XML.
+
+- [ ] Add `flate2` as a direct dependency (already in the build via `syntect`)
+- [ ] In the decode pipeline, when base64 yields binary, try raw-DEFLATE inflating it; keep the result only if it's readable text, the same rule as base64. This matters: in the captures two `sso_nonce` values also "inflated", to binary noise
+- [ ] Applies to query parameters, form fields and whole bodies; inflated XML is pretty printed and highlighted, and found by `/` and `f` like any decoded content
+- [ ] Decoded fields tagged `[deflate+base64]` instead of `[base64]`
+- [ ] Synthetic `SAMLRequest` fixture; unit tests for inflating, the readable-text rule, and a corrupt stream
+
+### Phase 8 — Copy as curl / bash script
+
+Turn the selected request into a `curl` command, like the browser DevTools' "Copy as cURL", to replay or tweak it from a shell. A fifth export target, so it gets the clipboard and file destinations for free.
+
+- [ ] **Bash script as the main output**: an executable `.sh` file (e.g. `exports/0012-api.example.com-login-request.sh`) with `#!/usr/bin/env bash` and `set -euo pipefail`, the curl command one option per line, owner-only executable permissions (`0700`). Secrets become variables at the top (`TOKEN=...`, `COOKIE=...`) so they're easy to swap or read from the environment; a binary or large body sits next to the script as a file it references
+- [ ] The plain command is also available for the clipboard
+- [ ] Shell quoting: single-quote every argument (`'` becomes `'\''`); DevTools also offers Windows `cmd` / PowerShell variants, which quote differently
+- [ ] Method: `-X` only when curl wouldn't infer it (e.g. not for GET, or POST with a body)
+- [ ] Headers: drop HTTP/2 pseudo-headers (`:authority`, `:method`, ...) and `Content-Length`; turn `Accept-Encoding` into `--compressed`; optionally `--http2` from the HTTP version
+- [ ] Body: `--data-raw` for text; binary or very large bodies need `--data-binary @file`, which pairs with exporting the body to a file; `multipart/form-data` as `--form` fields
+- [ ] Secrets: the command carries cookies and `Authorization` headers; consider an option to leave them out (or replace them with placeholders) when sharing
+- [ ] Unit tests: quoting (incl. quotes, newlines, non-ASCII), method inference, header filtering, body variants, secrets as variables, script layout and permissions
+
+### Phase 9 — Faster moves with a filter active
+
+- [ ] On a 19MB HAR, moving between filtered entries still costs ~25-30ms, mostly from running the search regex over every line of multi-megabyte bodies when the preview is rebuilt. Highlight only the visible window and count matches lazily; measure before and after on the real captures
+
 ## Backlog
 
 Ideas that came up during development. Not scheduled into a phase yet.
 
-- [ ] **External pager** (was phase 4). `b` opens the current body in `bat` → `batcat` → `$PAGER` → `less`. Deferred because export covers most of the need (view the file in any tool, copy via the clipboard) and handing the terminal to another program is the most fragile part of the plan. If added, the simplest form is "export, then open the file in `$PAGER`". Notes kept from the original plan:
-  - Stop the event-reader task before launching (otherwise it steals the pager's keystrokes), restore the terminal, run the pager, then re-enter the TUI and restart the task
-  - Temp file with owner-only permissions (`0600`), deleted afterwards even when the pager fails
-  - Without `bat` installed, `less` shows the body without highlighting
+- [ ] **SAML inspector.** Searching decoded SAML already works: `/param:claims/emailaddress\b` finds logins whose `SAMLResponse` carries that claim (and confirmed one was missing in a real capture, the cause of a bug), and `x` + `n` jump to the `<Attribute>` line. But it's text matching, and the values have to be read from the XML. A SAML-aware view would add:
+  - a `claim:` query term matching attribute *names* only, e.g. `/claim:emailaddress`
+  - a claims summary above the decoded XML: NameID and its format, Issuer, Audience, validity window (`NotBefore` / `NotOnOrAfter`), signed / encrypted, then each attribute name → values
+  - works for `SAMLRequest` too once phase 7 is in
 
-- [ ] **Copy as curl.** Turn the selected request into a `curl` command, like the browser DevTools' "Copy as cURL", to replay or tweak it from a shell. Fits as a fifth export target, so it gets the clipboard and file destinations for free. To explore:
-  - Shell quoting: single-quote every argument (`'` becomes `'\''`); DevTools also offers Windows `cmd` / PowerShell variants, which quote differently
-  - Method: `-X` only when curl wouldn't infer it (e.g. not for GET, or POST with a body)
-  - Headers: drop HTTP/2 pseudo-headers (`:authority`, `:method`, ...) and `Content-Length`; turn `Accept-Encoding` into `--compressed`; optionally `--http2` from the HTTP version
-  - Body: `--data-raw` for text; binary or very large bodies need `--data-binary @file`, which pairs with exporting the body to a file; `multipart/form-data` as `--form` fields
-  - Secrets: the command carries cookies and `Authorization` headers; consider an option to leave them out (or replace them with placeholders) when sharing
-  - **Preferred output: a bash script** rather than only a clipboard copy. Save the request as an executable `.sh` file (e.g. `exports/0012-api.example.com-login-request.sh`) with a `#!/usr/bin/env bash` shebang and `set -euo pipefail`, the curl command split one option per line for readability, and owner-only, executable permissions (`0700`). Secrets could become variables at the top of the script (`TOKEN=...`, `COOKIE=...`), so they're easy to swap or read from the environment instead. A binary or large body can sit next to the script as a file it references
-- [ ] **Faster moves with a filter active.** On a 19MB HAR, moving between filtered entries still costs ~25-30ms, now mostly from running the search regex over every line of multi-megabyte bodies when the preview is rebuilt. Could highlight only the visible window and count matches lazily
-- [ ] **Inflate deflate-compressed values**, e.g. a SAML HTTP-Redirect `SAMLRequest` in a query string (raw DEFLATE, then base64, then URL-encoding). Would need the `flate2` crate (already in the dependency tree via `syntect`)
+## Won't do
+
+- **External pager** (was phase 4, `b` to open a body in `bat` / `less`). Export covers the need (view the file in any tool, copy via the clipboard, clean text either way), and handing the terminal to another program would be the most fragile code in the project. Kept here so it isn't proposed again without new reasons

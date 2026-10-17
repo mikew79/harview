@@ -120,6 +120,10 @@ parameters are searched in decoded form (URL-encoding and base64), whether or no
 
 For example: `method:POST status:4xx`, `host:api !type:image`, `body:"invalid credentials"`.
 
+To check a SAML login for a claim, search the decoded form fields, e.g. `param:claims/emailaddress\b`
+finds logins whose `SAMLResponse` contains an `emailaddress` claim (no match means it's missing).
+Press `x` to show the assertion decoded and `n` to jump to the matching `<Attribute>` line.
+
 ## Installation
 
 Clone this repository then run `cargo install`
