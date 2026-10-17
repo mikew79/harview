@@ -13,16 +13,20 @@ const MATCH_STYLE: Style = Style::new().fg(Color::Black).bg(Color::Yellow);
 const MATCH_CONTEXT_ROWS: usize = 2;
 
 pub fn render(app: &mut App, frame: &mut Frame) {
+    // `z` hides the table; it keeps its selection and scroll position for when it comes back
+    let table_height = if app.preview_maximized {
+        Constraint::Length(0)
+    } else {
+        Constraint::Fill(1)
+    };
     let main_layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Fill(1),
-            Constraint::Fill(1),
-            Constraint::Length(1),
-        ])
+        .constraints([table_height, Constraint::Fill(1), Constraint::Length(1)])
         .split(frame.size());
 
-    render_table(app, main_layout[0], frame.buffer_mut());
+    if !app.preview_maximized {
+        render_table(app, main_layout[0], frame.buffer_mut());
+    }
     render_preview(app, main_layout[1], frame.buffer_mut());
     // After the preview, which resolves match jumps and may set a message
     render_status_bar(app, main_layout[2], frame.buffer_mut());
@@ -464,7 +468,15 @@ pub fn render_preview(app: &mut App, area: Rect, buf: &mut Buffer) {
     let content = Paragraph::new(window)
         .wrap(Wrap { trim: false })
         .scroll((offset, 0))
-        .block(block.title_bottom(Line::from(position).right_aligned()));
+        .block(
+            block
+                .title_bottom(Line::from(position).right_aligned())
+                .title_bottom(Line::from(if app.preview_maximized {
+                    " z: restore "
+                } else {
+                    " z: full screen "
+                })),
+        );
 
     Widget::render(content, layout[1], buf);
 }

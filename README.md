@@ -82,6 +82,7 @@ TUI can be controlled with the following keys:
 | `n` / `N` | Next / previous match in the preview |
 | `Esc` | Clear find, then the filter |
 | `e` | Export the selected entry (see below) |
+| `z` | Full-screen preview / restore the split |
 | `q` or `Ctrl-C` | Quit application |
 
 #### Export

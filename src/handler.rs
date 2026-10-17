@@ -15,6 +15,7 @@ pub enum Command {
     TogglePretty,
     ToggleDecode,
     ToggleHighlight,
+    TogglePreviewMaximized,
     StartInput(InputKind),
     NextMatch,
     PrevMatch,
@@ -54,6 +55,7 @@ impl Command {
             Self::TogglePretty => app.toggle_pretty(),
             Self::ToggleDecode => app.toggle_decode(),
             Self::ToggleHighlight => app.toggle_highlight(),
+            Self::TogglePreviewMaximized => app.toggle_preview_maximized(),
             Self::StartInput(kind) => app.start_input(*kind),
             Self::NextMatch => app.jump_to_match(MatchJump::Next),
             Self::PrevMatch => app.jump_to_match(MatchJump::Prev),
@@ -146,7 +148,13 @@ pub const KEY_HELP: &[(&str, &[(&str, &str)])] = &[
             ("c", "In the menu: copy to the clipboard (OSC 52, up to 100KB)"),
         ],
     ),
-    ("General", &[("q / Ctrl-C", "Quit")]),
+    (
+        "General",
+        &[
+            ("z", "Full-screen preview / restore the split"),
+            ("q / Ctrl-C", "Quit"),
+        ],
+    ),
 ];
 
 pub fn handle_key_events(key_event: KeyEvent, mode: Mode) -> Option<Command> {
@@ -225,6 +233,7 @@ fn normal_mode_keys(key_event: KeyEvent) -> Option<Command> {
         KeyCode::Char('p') => Some(Command::TogglePretty),
         KeyCode::Char('x') => Some(Command::ToggleDecode),
         KeyCode::Char('s') => Some(Command::ToggleHighlight),
+        KeyCode::Char('z') => Some(Command::TogglePreviewMaximized),
         KeyCode::Char('e') => Some(Command::OpenExport),
         KeyCode::Char('/') => Some(Command::StartInput(InputKind::Filter)),
         KeyCode::Char('f') => Some(Command::StartInput(InputKind::Find)),
@@ -327,6 +336,13 @@ mod tests {
         let command = handle_key_events(ctrl_c, FILTER_INPUT);
 
         assert_eq!(command, Some(Command::Quit));
+    }
+
+    #[test]
+    fn handle_key_events_z_toggles_full_screen_preview() {
+        let command = handle_key_events(key(KeyCode::Char('z')), Mode::Normal);
+
+        assert_eq!(command, Some(Command::TogglePreviewMaximized));
     }
 
     #[test]

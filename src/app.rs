@@ -136,6 +136,8 @@ pub struct App {
     pub tabbar_state: TabBarState,
     pub body_options: BodyOptions,
     pub preview_scroll: u16,
+    /// `z`: the preview fills the screen and the table is hidden
+    pub preview_maximized: bool,
     pub input: Input,
     /// Active `/` filter: its text and parsed query
     pub filter: Option<(String, Query)>,
@@ -200,6 +202,7 @@ impl App {
             tabbar_state: TabBarState::Headers,
             body_options: BodyOptions::default(),
             preview_scroll: 0,
+            preview_maximized: false,
             input: Input::default(),
             filter: None,
             find: None,
@@ -564,6 +567,10 @@ impl App {
         self.body_options.pretty = !self.body_options.pretty;
         self.preview_scroll = 0;
         self.rejump_after_content_change();
+    }
+
+    pub fn toggle_preview_maximized(&mut self) {
+        self.preview_maximized = !self.preview_maximized;
     }
 
     pub fn toggle_highlight(&mut self) {
@@ -1197,6 +1204,28 @@ mod tests {
             (app.mode, app.message.as_ref().map(|m| m.error), app.take_clipboard()),
             (Mode::ExportMenu, Some(true), None)
         );
+    }
+
+    #[test]
+    fn toggle_preview_maximized_twice_restores_split() {
+        let mut app = app_with_entries(1);
+
+        app.toggle_preview_maximized();
+        let maximized = app.preview_maximized;
+        app.toggle_preview_maximized();
+
+        assert_eq!((maximized, app.preview_maximized), (true, false));
+    }
+
+    #[test]
+    fn toggle_preview_maximized_keeps_selection_and_scroll() {
+        let mut app = app_with_entries(3);
+        app.update_index(2);
+        app.scroll_preview(4);
+
+        app.toggle_preview_maximized();
+
+        assert_eq!((app.selected_entry(), app.preview_scroll), (Some(2), 4));
     }
 
     #[test]
