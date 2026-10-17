@@ -81,7 +81,21 @@ TUI can be controlled with the following keys:
 | `f` | Find in the preview, without filtering the table |
 | `n` / `N` | Next / previous match in the preview |
 | `Esc` | Clear find, then the filter |
+| `e` | Export the selected entry (see below) |
 | `q` or `Ctrl-C` | Quit application |
+
+#### Export
+
+Press `e` to export the selected entry: `1`-`4` choose the request body, response body, full
+request or full response (raw HTTP), and `d` switches between *decoded* (as shown in the preview:
+base64 decoded, pretty printed, and form fields such as a `SAMLResponse` decoded) and *exactly as
+stored in the HAR*. `Enter` saves to a file, by default under `exports/`; `c` copies to the clipboard.
+
+> [!NOTE]
+> The clipboard uses the OSC 52 terminal escape sequence, so it also works over SSH. Your terminal
+> must allow it (Windows Terminal, iTerm2, kitty, WezTerm and others do); inside tmux, add
+> `set -g set-clipboard on` to `~/.tmux.conf`. Binary content and anything over 100KB can only be
+> saved to a file.
 
 #### Search queries
 

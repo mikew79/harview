@@ -1,4 +1,5 @@
 use crate::app::{self, InputKind, MatchJump, Mode};
+use crate::export::ExportTarget;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 #[derive(Debug, PartialEq)]
@@ -28,6 +29,13 @@ pub enum Command {
     InputClear,
     InputSubmit,
     InputCancel,
+    OpenExport,
+    ExportSelect(ExportTarget),
+    ExportCycle(i32),
+    ExportToggleDecoded,
+    ExportToFile,
+    ExportToClipboard,
+    ExportCancel,
 }
 
 impl Command {
@@ -60,6 +68,13 @@ impl Command {
             Self::InputClear => app.input.clear(),
             Self::InputSubmit => app.submit_input(),
             Self::InputCancel => app.cancel_input(),
+            Self::OpenExport => app.open_export(),
+            Self::ExportSelect(target) => app.select_export_target(*target),
+            Self::ExportCycle(delta) => app.cycle_export_target(*delta),
+            Self::ExportToggleDecoded => app.toggle_export_decoded(),
+            Self::ExportToFile => app.export_to_file(),
+            Self::ExportToClipboard => app.export_to_clipboard(),
+            Self::ExportCancel => app.close_export(),
         }
     }
 }
@@ -121,6 +136,16 @@ pub const KEY_HELP: &[(&str, &[(&str, &str)])] = &[
             ("Case", "Insensitive unless the pattern has uppercase"),
         ],
     ),
+    (
+        "Export",
+        &[
+            ("e", "Export menu: request / response body, full request / response"),
+            ("1 - 4, j / k", "In the menu: choose what to export"),
+            ("d", "In the menu: decoded (as previewed) or as stored in the HAR"),
+            ("Enter / f", "In the menu: save to a file (default under exports/)"),
+            ("c", "In the menu: copy to the clipboard (OSC 52, up to 100KB)"),
+        ],
+    ),
     ("General", &[("q / Ctrl-C", "Quit")]),
 ];
 
@@ -128,6 +153,25 @@ pub fn handle_key_events(key_event: KeyEvent, mode: Mode) -> Option<Command> {
     match mode {
         Mode::Normal => normal_mode_keys(key_event),
         Mode::Input(_) => input_mode_keys(key_event),
+        Mode::ExportMenu => export_menu_keys(key_event),
+    }
+}
+
+fn export_menu_keys(key_event: KeyEvent) -> Option<Command> {
+    let ctrl = key_event.modifiers.contains(KeyModifiers::CONTROL);
+    match key_event.code {
+        KeyCode::Char('c') if ctrl => Some(Command::Quit),
+        KeyCode::Char(digit @ '1'..='4') => {
+            let index = digit as usize - '1' as usize;
+            Some(Command::ExportSelect(ExportTarget::ALL[index]))
+        }
+        KeyCode::Char('j') | KeyCode::Down => Some(Command::ExportCycle(1)),
+        KeyCode::Char('k') | KeyCode::Up => Some(Command::ExportCycle(-1)),
+        KeyCode::Char('d') => Some(Command::ExportToggleDecoded),
+        KeyCode::Enter | KeyCode::Char('f') => Some(Command::ExportToFile),
+        KeyCode::Char('c') => Some(Command::ExportToClipboard),
+        KeyCode::Esc | KeyCode::Char('q') => Some(Command::ExportCancel),
+        _ => None,
     }
 }
 
@@ -181,6 +225,7 @@ fn normal_mode_keys(key_event: KeyEvent) -> Option<Command> {
         KeyCode::Char('p') => Some(Command::TogglePretty),
         KeyCode::Char('x') => Some(Command::ToggleDecode),
         KeyCode::Char('s') => Some(Command::ToggleHighlight),
+        KeyCode::Char('e') => Some(Command::OpenExport),
         KeyCode::Char('/') => Some(Command::StartInput(InputKind::Filter)),
         KeyCode::Char('f') => Some(Command::StartInput(InputKind::Find)),
         KeyCode::Char('n') => Some(Command::NextMatch),
@@ -289,6 +334,33 @@ mod tests {
         let command = handle_key_events(key(KeyCode::Char('s')), Mode::Normal);
 
         assert_eq!(command, Some(Command::ToggleHighlight));
+    }
+
+    #[test]
+    fn handle_key_events_e_opens_export() {
+        let command = handle_key_events(key(KeyCode::Char('e')), Mode::Normal);
+
+        assert_eq!(command, Some(Command::OpenExport));
+    }
+
+    #[test]
+    fn handle_key_events_in_export_menu_digits_select_target() {
+        let command = handle_key_events(key(KeyCode::Char('3')), Mode::ExportMenu);
+
+        assert_eq!(command, Some(Command::ExportSelect(ExportTarget::FullRequest)));
+    }
+
+    #[test]
+    fn handle_key_events_in_export_menu_c_copies_and_q_cancels() {
+        let commands = (
+            handle_key_events(key(KeyCode::Char('c')), Mode::ExportMenu),
+            handle_key_events(key(KeyCode::Char('q')), Mode::ExportMenu),
+        );
+
+        assert_eq!(
+            commands,
+            (Some(Command::ExportToClipboard), Some(Command::ExportCancel))
+        );
     }
 
     #[test]
