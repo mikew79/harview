@@ -8,6 +8,7 @@ use base64::engine::general_purpose::{GeneralPurpose, PAD_INDIFFERENT, STANDARD}
 use base64::Engine;
 use quick_xml::events::{BytesText, Event};
 use quick_xml::{Reader, Writer};
+use flate2::{Decompress, FlushDecompress, Status};
 use std::borrow::Cow;
 
 /// User-toggleable pipeline settings; part of the preview cache key
@@ -102,8 +103,8 @@ pub fn process<'a>(body: &Body<'a>, options: BodyOptions) -> Processed<'a> {
             }
         },
         // Bodies the HAR doesn't mark as encoded can still be base64 (common for request payloads)
-        _ if options.decode => match decode_implicit_base64(text) {
-            Some(decoded) => Cow::Owned(decoded),
+        _ if options.decode => match decode_implicit(text) {
+            Some((decoded, _)) => Cow::Owned(decoded),
             None => Cow::Borrowed(text),
         },
         _ => Cow::Borrowed(text),
@@ -124,26 +125,44 @@ pub fn process<'a>(body: &Body<'a>, options: BodyOptions) -> Processed<'a> {
     Processed::Text(decoded)
 }
 
+/// How a value that merely looked encoded turned out to be encoded
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImplicitEncoding {
+    Base64,
+    /// Raw DEFLATE, then base64, e.g. a SAML HTTP-Redirect `SAMLRequest`
+    DeflateBase64,
+}
+
+impl ImplicitEncoding {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Base64 => "base64",
+            Self::DeflateBase64 => "deflate+base64",
+        }
+    }
+}
+
 /// A form field or query parameter value prepared for display
 #[derive(Debug, PartialEq)]
 pub struct DecodedField<'a> {
     pub text: Cow<'a, str>,
-    /// The value was base64 (after URL-decoding)
-    pub base64: bool,
+    /// Set when the value was base64 (after URL-decoding)
+    pub encoding: Option<ImplicitEncoding>,
 }
 
-/// With decoding on, URL-decodes a form / query value, then decodes base64 when that yields
-/// readable text (e.g. a SAMLResponse), pretty printing the result
+/// With decoding on, URL-decodes a form / query value, then decodes base64 (inflating it when
+/// it was also deflated) when that yields readable text, e.g. a SAMLResponse or SAMLRequest,
+/// pretty printing the result
 pub fn decode_field(value: &str, options: BodyOptions) -> DecodedField<'_> {
     if !options.decode {
         return DecodedField {
             text: Cow::Borrowed(value),
-            base64: false,
+            encoding: None,
         };
     }
 
     // `+` is a literal base64 character, but a space in form encoding: try base64 with it kept
-    if let Some(decoded) = decode_implicit_base64(&percent_decode(value, false)) {
+    if let Some((decoded, encoding)) = decode_implicit(&percent_decode(value, false)) {
         let text = if options.pretty {
             pretty_print(&decoded, sniff_kind(&decoded)).unwrap_or(decoded)
         } else {
@@ -151,12 +170,12 @@ pub fn decode_field(value: &str, options: BodyOptions) -> DecodedField<'_> {
         };
         return DecodedField {
             text: Cow::Owned(text),
-            base64: true,
+            encoding: Some(encoding),
         };
     }
     DecodedField {
         text: percent_decode(value, true),
-        base64: false,
+        encoding: None,
     }
 }
 
@@ -213,10 +232,59 @@ const URL_SAFE_LENIENT: GeneralPurpose = GeneralPurpose::new(&alphabet::URL_SAFE
 /// Shorter tokens are too often plain ids or words to treat as base64
 const MIN_IMPLICIT_BASE64_LEN: usize = 16;
 
-/// Decodes text that merely *looks* like base64 (standard or URL-safe, padding optional).
-/// Only accepted when the result is readable text, so ids and hashes that happen to use the
-/// base64 alphabet are left alone.
-fn decode_implicit_base64(text: &str) -> Option<String> {
+/// Inflated content is capped, so a tiny "decompression bomb" can't exhaust memory
+const MAX_INFLATED_BYTES: usize = 10 * 1024 * 1024;
+
+/// Decodes text that merely *looks* encoded: base64 (standard or URL-safe, padding optional),
+/// inflating it when the base64 holds raw DEFLATE data. Only accepted when the result is
+/// readable text, so ids, hashes and opaque tokens that happen to use the base64 alphabet are
+/// left alone (random bytes occasionally inflate, but to binary noise)
+fn decode_implicit(text: &str) -> Option<(String, ImplicitEncoding)> {
+    let bytes = decode_implicit_base64(text)?;
+    let bytes = match String::from_utf8(bytes) {
+        Ok(text) if is_readable(&text) => return Some((text, ImplicitEncoding::Base64)),
+        Ok(text) => text.into_bytes(),
+        Err(error) => error.into_bytes(),
+    };
+    let inflated = inflate(&bytes)?;
+    Some((inflated, ImplicitEncoding::DeflateBase64))
+}
+
+/// Raw DEFLATE (no zlib / gzip header), as used by the SAML HTTP-Redirect binding.
+/// Only a complete stream that uses up exactly all of `bytes` counts: a truncated stream would
+/// otherwise give partial output with no error, and damaged data can still stop early on what
+/// looks like a valid end
+fn inflate(bytes: &[u8]) -> Option<String> {
+    let mut decompress = Decompress::new(false);
+    let mut inflated = Vec::with_capacity(bytes.len().saturating_mul(4).min(MAX_INFLATED_BYTES));
+    loop {
+        if inflated.len() == inflated.capacity() {
+            if inflated.len() >= MAX_INFLATED_BYTES {
+                return None;
+            }
+            inflated.reserve((inflated.len() + 1024).min(MAX_INFLATED_BYTES - inflated.len()));
+        }
+        let (read, written) = (decompress.total_in(), decompress.total_out());
+        let input = &bytes[read as usize..];
+        let status = decompress
+            .decompress_vec(input, &mut inflated, FlushDecompress::Finish)
+            .ok()?;
+        if status == Status::StreamEnd {
+            break;
+        }
+        // No progress: the input ended before the stream did
+        if decompress.total_in() == read && decompress.total_out() == written {
+            return None;
+        }
+    }
+    if decompress.total_in() as usize != bytes.len() {
+        return None;
+    }
+    String::from_utf8(inflated).ok().filter(|text| is_readable(text))
+}
+
+/// The bytes of text that looks like base64, `None` if it doesn't
+fn decode_implicit_base64(text: &str) -> Option<Vec<u8>> {
     let compact: String = text.chars().filter(|c| !c.is_ascii_whitespace()).collect();
     let unpadded = compact.trim_end_matches('=');
     if unpadded.len() < MIN_IMPLICIT_BASE64_LEN || compact.len() - unpadded.len() > 2 {
@@ -233,8 +301,7 @@ fn decode_implicit_base64(text: &str) -> Option<String> {
     } else {
         &STANDARD_LENIENT
     };
-    let decoded = String::from_utf8(engine.decode(&compact).ok()?).ok()?;
-    is_readable(&decoded).then_some(decoded)
+    engine.decode(&compact).ok()
 }
 
 fn is_readable(text: &str) -> bool {
@@ -646,7 +713,7 @@ mod tests {
             result,
             DecodedField {
                 text: Cow::Owned("<a>\n  <b>x</b>\n</a>".to_string()),
-                base64: true
+                encoding: Some(ImplicitEncoding::Base64)
             }
         );
     }
@@ -659,7 +726,7 @@ mod tests {
             result,
             DecodedField {
                 text: Cow::Borrowed("PGE%2BPGI%2BeDwvYj48L2E%2B"),
-                base64: false
+                encoding: None
             }
         );
     }
@@ -689,7 +756,7 @@ mod tests {
             result,
             DecodedField {
                 text: Cow::Borrowed("q83vASNFZ4mrze8B"),
-                base64: false
+                encoding: None
             }
         );
     }
@@ -702,7 +769,7 @@ mod tests {
             result,
             DecodedField {
                 text: Cow::Owned("search term!".to_string()),
-                base64: false
+                encoding: None
             }
         );
     }
@@ -711,7 +778,67 @@ mod tests {
     fn decode_field_short_token_is_not_treated_as_base64() {
         let result = decode_field("abcd1234", DECODE_RAW);
 
-        assert_eq!(result.base64, false);
+        assert_eq!(result.encoding, None);
+    }
+
+    #[test]
+    fn decode_field_deflated_saml_request_is_inflated_and_pretty_printed() {
+        // raw DEFLATE + base64 + percent-encoding of <a><b>x</b></a>, as in a SAMLRequest
+        let result = decode_field("s0m0s0myq7DRT7Kz0U%2B0AwA%3D", DECODE);
+
+        assert_eq!(
+            result,
+            DecodedField {
+                text: Cow::Owned("<a>\n  <b>x</b>\n</a>".to_string()),
+                encoding: Some(ImplicitEncoding::DeflateBase64)
+            }
+        );
+    }
+
+    #[test]
+    fn decode_field_damaged_deflate_stream_keeps_original_value() {
+        // the middle zeroed: the stream ends early (inflating to `<a8`) with input left over
+        let result = decode_field("s0m0AAAAAAAAAAAA0U%2B0AwA%3D", DECODE_RAW);
+
+        assert_eq!(result.encoding, None);
+    }
+
+    #[test]
+    fn decode_field_truncated_deflate_stream_keeps_original_value() {
+        // cut short: would inflate to the partial `<a><b>x<` without the completeness check
+        let result = decode_field("s0m0s0myq7DRT7Kz0U%2B0", DECODE_RAW);
+
+        assert_eq!(result.encoding, None);
+    }
+
+    #[test]
+    fn inflate_rejects_binary_output() {
+        use flate2::write::DeflateEncoder;
+        use std::io::Write;
+        let mut encoder = DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&[0u8, 1, 2, 3, 255, 254]).expect("compress");
+
+        assert_eq!(inflate(&encoder.finish().expect("compress")), None);
+    }
+
+    #[test]
+    fn inflate_rejects_output_over_the_size_cap() {
+        use flate2::write::DeflateEncoder;
+        use std::io::Write;
+        let mut encoder = DeflateEncoder::new(Vec::new(), flate2::Compression::best());
+        encoder
+            .write_all(&vec![b'a'; MAX_INFLATED_BYTES + 1])
+            .expect("compress");
+        let bomb = encoder.finish().expect("compress");
+
+        assert_eq!((bomb.len() < 20_000, inflate(&bomb)), (true, None));
+    }
+
+    #[test]
+    fn process_unmarked_deflate_base64_body_is_inflated() {
+        let result = process(&body(Some("s0m0s0myq7DRT7Kz0U+0AwA="), Some("text/plain")), DECODE);
+
+        assert_eq!(result, Processed::Text(Cow::Owned("<a>\n  <b>x</b>\n</a>".to_string())));
     }
 
     #[test]

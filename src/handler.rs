@@ -106,7 +106,7 @@ pub const KEY_HELP: &[(&str, &[(&str, &str)])] = &[
         "Body",
         &[
             ("p", "Toggle pretty printing (JSON, XML, HTML)"),
-            ("x", "Toggle decoding: base64 bodies, URL / base64 form and query values"),
+            ("x", "Toggle decoding: base64 bodies; URL / base64 / deflate form and query values"),
             ("s", "Toggle syntax highlighting (JSON/XML to 200KB, JS/CSS/HTML to 32KB)"),
         ],
     ),

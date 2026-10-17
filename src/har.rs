@@ -228,7 +228,7 @@ mod tests {
     async fn from_file_sample_loads_all_entries() {
         let har = Har::from_file(&fixture("sample.har")).await.expect("sample parses");
 
-        assert_eq!(har.log.entries.len(), 11);
+        assert_eq!(har.log.entries.len(), 12);
     }
 
     #[tokio::test]

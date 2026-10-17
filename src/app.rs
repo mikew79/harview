@@ -993,6 +993,17 @@ mod tests {
     }
 
     #[test]
+    fn apply_filter_matches_inflated_saml_request() {
+        let mut app = app_from_fixture();
+
+        app.apply_filter("param:AuthnRequest.*AssertionConsumerServiceURL")
+            .expect("valid query");
+
+        // the SAML redirect fixture, last entry: SAMLRequest is deflate + base64 in the URL
+        assert_eq!(app.visible(), &[11]);
+    }
+
+    #[test]
     fn apply_filter_invalid_query_keeps_previous_view() {
         let mut app = app_from_fixture();
 
@@ -1000,7 +1011,7 @@ mod tests {
 
         assert_eq!(
             (result.is_err(), app.max_index(), app.filter.is_none()),
-            (true, 11, true)
+            (true, 12, true)
         );
     }
 
@@ -1011,7 +1022,7 @@ mod tests {
 
         app.apply_filter("  ").expect("empty query");
 
-        assert_eq!((app.max_index(), app.filter.is_none()), (11, true));
+        assert_eq!((app.max_index(), app.filter.is_none()), (12, true));
     }
 
     #[test]
@@ -1055,7 +1066,7 @@ mod tests {
 
         app.apply_find("alice").expect("valid regex");
 
-        assert_eq!(app.max_index(), 11);
+        assert_eq!(app.max_index(), 12);
     }
 
     #[test]

@@ -557,6 +557,7 @@ dependencies = [
  "byte-unit",
  "clap",
  "crossterm",
+ "flate2",
  "futures",
  "mime",
  "quick-xml",

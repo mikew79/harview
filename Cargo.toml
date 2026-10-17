@@ -11,6 +11,7 @@ base64 = "0.23.1"
 byte-unit = "5.1.4"
 clap = { version = "4.5.9", features = ["derive"] }
 crossterm = { version = "0.27.0", features = ["event-stream"] }
+flate2 = "1.1.10"
 futures = "0.3.30"
 mime = "0.3.17"
 quick-xml = "0.42.0"
