@@ -14,8 +14,8 @@ against the synthetic fixtures in `tests/fixtures/`. Tick items off in the same 
 | New crates | `regex`, `base64`, `quick-xml`, `syntect` (with `default-fancy`, pure Rust, no C dependency). Temp files use `std`, not `tempfile`. |
 | Search behaviour | An active search **filters** the table to matching entries and highlights matches in both panes. `Esc` clears it. |
 | Export targets | File in `./exports/` (git-ignored) **and** clipboard via OSC 52. |
-| External viewer | `bat` → `batcat` → `$PAGER` → `less`. |
-| Syntax highlighting limit | Per language, to keep the UI responsive: JSON / XML up to 200KB, JavaScript / CSS / HTML up to 32KB (syntect's JS-family grammars cost ~3µs per byte, so 200KB of JS blocked for ~0.6s). Larger bodies are shown plain with a note; use `b` to view them in the pager. |
+| External viewer | Moved to the backlog: export (phase 5) covers most of the need without handing the terminal to another program. If added later: `bat` → `batcat` → `$PAGER` → `less`. |
+| Syntax highlighting limit | Per language, to keep the UI responsive: JSON / XML up to 200KB, JavaScript / CSS / HTML up to 32KB (syntect's JS-family grammars cost ~3µs per byte, so 200KB of JS blocked for ~0.6s). Larger bodies are shown plain with a note; export them to view elsewhere. |
 
 ## Key bindings
 
@@ -37,7 +37,6 @@ Existing keys keep their meaning. New keys are marked ✚.
 | ✚ `s` | Toggle syntax highlighting |
 | ✚ `p` | Toggle pretty printing |
 | ✚ `x` | Toggle base64 decoding |
-| ✚ `b` | Open current body in external pager |
 | ✚ `e` | Export menu |
 | ✚ `z` | Full-screen preview / restore |
 | `q`, `Ctrl-C` | Quit |
@@ -106,33 +105,26 @@ Delivered in three steps, each building and passing tests before the next:
 - [x] Add `syntect` (`default-fancy`, pure Rust; it also pulls in `flate2`, which the backlog's deflate item needs)
 - [x] JSON, HTML, XML, JavaScript, CSS; language picked from MIME type, else sniffed from the content (also used for decoded multi-line form fields such as a SAML assertion). On by default; theme `base16-ocean.dark`, foreground colours only
 - [x] `s` toggles highlighting; the status bar shows `syntax`
-- [x] Size limits per language (see Decisions); skipped bodies show `(syntax highlighting skipped: JavaScript body is over 32KB)`. The hint to use `b` is added in phase 4
+- [x] Size limits per language (see Decisions); skipped bodies show `(syntax highlighting skipped: JavaScript body is over 32KB)`. Export (phase 5) is the way to view them elsewhere
 - [x] syntect styles converted to ratatui spans; search highlighting layered on top
 - [x] Wrapped layout cached per preview and width (it used to be recounted every frame), and only the visible lines are copied for rendering
 - [x] Long (≥10KB) ASCII lines, i.e. minified code, are wrapped at exactly the preview width instead of at word boundaries, so their layout is arithmetic and only visible rows are cut out: on a 19MB HAR, moving through entries on the Response tab went from ~20ms to ~12ms per entry; jumping to matches in such lines is exact
 - [x] Finding which other tab has a match renders the tabs without pretty printing or highlighting
 - [x] Unit tests: language detection and sniffing, bundled syntaxes, per-language limits, span conversion, wrapped layout, visible window slicing, hard wrapping
 
-### Phase 4 — External pager
-
-- [ ] `b` writes the current body (after decoding / pretty printing) to a temp file with owner-only permissions (`0600`) and an extension matching the MIME type
-- [ ] Pager resolution: `bat` → `batcat` → `$PAGER` → `less`
-- [ ] Stop the event-reader task before launching (otherwise it steals the pager's keystrokes), restore the terminal, run the pager, then re-enter the TUI and restart the task
-- [ ] Temp file deleted afterwards, including when the pager fails
-- [ ] Error shown in the status bar if no pager is found
-
 ### Phase 5 — Export
 
-- [ ] `e` opens a popup menu:
+- [x] `e` opens a popup menu (`1`-`4` or `j` / `k`; the default follows the current tab):
   - request body
   - response body
   - full request (request line + headers + body, raw HTTP text)
   - full response (status line + headers + body)
-- [ ] Option: decoded body or exactly as stored in the HAR
-- [ ] Destination: file or clipboard
-- [ ] File: filename prompt with a default like `0012-api.example.com-users.json`, written to `./exports/`; add `exports/` to `.gitignore`
-- [ ] Clipboard: OSC 52. Over the size cap (~100KB) copy nothing and explain in the status bar. Needs `set -g set-clipboard on` inside tmux
-- [ ] Unit tests: raw HTTP formatting, default filename generation
+- [x] `d`: decoded (as previewed: base64 decoded, pretty printed when `p` is on) or exactly as stored in the HAR. A decoded form body is exported as its decoded fields, e.g. a `SAMLResponse` as its XML assertion. Decoded binary (images, fonts) is written as the real bytes
+- [x] Destination: file (`Enter` / `f`) or clipboard (`c`)
+- [x] File: filename prompt prefilled like `exports/0012-api.example.com-users-response-body.json` (extension from the MIME type, `.http` for full exports, `.b64` for undecoded base64), editable; parent directories created; owner-only permissions (`0600`); an existing file is only replaced when the same path is submitted twice. `exports/` is git-ignored. `Esc` returns to the menu
+- [x] Clipboard: OSC 52, written to the terminal. Binary content and anything over 100KB is refused with an explanation. Needs `set -g set-clipboard on` inside tmux
+- [x] Empty or missing bodies are reported instead of exporting nothing; start lines skip fields the HAR left empty
+- [x] Unit tests: raw HTTP formatting, decoded vs stored bodies, decoded form fields, binary, default file names and sanitising, OSC 52 encoding and limits, file writing (no overwrite, `0600`), menu state and key handling
 
 ### Phase 6 — Full-screen preview
 
@@ -141,6 +133,11 @@ Delivered in three steps, each building and passing tests before the next:
 ## Backlog
 
 Ideas that came up during development. Not scheduled into a phase yet.
+
+- [ ] **External pager** (was phase 4). `b` opens the current body in `bat` → `batcat` → `$PAGER` → `less`. Deferred because export covers most of the need (view the file in any tool, copy via the clipboard) and handing the terminal to another program is the most fragile part of the plan. If added, the simplest form is "export, then open the file in `$PAGER`". Notes kept from the original plan:
+  - Stop the event-reader task before launching (otherwise it steals the pager's keystrokes), restore the terminal, run the pager, then re-enter the TUI and restart the task
+  - Temp file with owner-only permissions (`0600`), deleted afterwards even when the pager fails
+  - Without `bat` installed, `less` shows the body without highlighting
 
 - [ ] **Faster moves with a filter active.** On a 19MB HAR, moving between filtered entries still costs ~25-30ms, now mostly from running the search regex over every line of multi-megabyte bodies when the preview is rebuilt. Could highlight only the visible window and count matches lazily
 - [ ] **Inflate deflate-compressed values**, e.g. a SAML HTTP-Redirect `SAMLRequest` in a query string (raw DEFLATE, then base64, then URL-encoding). Would need the `flate2` crate (already in the dependency tree via `syntect`)

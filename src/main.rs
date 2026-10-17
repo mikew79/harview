@@ -1,6 +1,7 @@
 mod app;
 mod body;
 mod event;
+mod export;
 mod handler;
 mod har;
 mod search;
@@ -12,6 +13,7 @@ use clap;
 use clap::Parser;
 use har::Har;
 use ratatui::prelude::*;
+use std::io::Write;
 use std::path::PathBuf;
 use tokio;
 
@@ -70,6 +72,12 @@ async fn event_loop<B: Backend>(tui: &mut tui::Tui<B>, app: &mut app::App) -> an
             event::Event::Key(key_event) => {
                 if let Some(command) = handler::handle_key_events(key_event, app.mode) {
                     command.exec(app);
+                }
+                // Clipboard copies are escape sequences the terminal itself acts on
+                if let Some(sequence) = app.take_clipboard() {
+                    let mut terminal = std::io::stderr();
+                    terminal.write_all(sequence.as_bytes())?;
+                    terminal.flush()?;
                 }
                 tui.draw(app)?;
             }

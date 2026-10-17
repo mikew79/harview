@@ -6,3 +6,6 @@
 *:Zone.Identifier
 # Synthetic test fixtures only - never put real captures here
 !/tests/fixtures/*.har
+
+# Exported requests / responses may contain cookies, tokens and other sensitive data
+/exports/

@@ -1,15 +1,17 @@
 use crate::body::BodyOptions;
+use crate::export::{self, ExportTarget};
 use crate::search::{self, EntryText, Query};
 use mime;
 use ratatui::{prelude::*, widgets::*};
 use regex::Regex;
 
-/// Input mode; decides how key events are interpreted.
-/// Later phases add modes for the export menu and the export path prompt.
+/// Input mode; decides how key events are interpreted
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Normal,
     Input(InputKind),
+    /// The `e` export popup
+    ExportMenu,
 }
 
 /// What the input bar is editing
@@ -19,6 +21,18 @@ pub enum InputKind {
     Filter,
     /// `f`: searches the current preview only
     Find,
+    /// File name for an export
+    ExportPath,
+}
+
+/// Choices made in the export popup
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExportState {
+    pub target: ExportTarget,
+    /// Decoded / pretty printed as in the preview, or exactly as stored in the HAR
+    pub decoded: bool,
+    /// Path the user was warned already exists; submitting it again overwrites
+    overwrite_path: Option<String>,
 }
 
 /// Single-line text input with a cursor (counted in chars)
@@ -132,6 +146,9 @@ pub struct App {
     /// Bumped whenever the filter or find changes, so the preview is re-highlighted
     highlight_generation: u64,
     pub message: Option<Message>,
+    pub export: ExportState,
+    /// OSC 52 sequence waiting to be written to the terminal
+    pending_clipboard: Option<String>,
     pub match_jump: Option<MatchJump>,
     /// Index into the preview's matches of the one last jumped to
     pub match_cursor: Option<usize>,
@@ -189,6 +206,12 @@ impl App {
             search_texts: None,
             highlight_generation: 0,
             message: None,
+            export: ExportState {
+                target: ExportTarget::ResponseBody,
+                decoded: true,
+                overwrite_path: None,
+            },
+            pending_clipboard: None,
             match_jump: None,
             match_cursor: None,
             table_items: har.to_table_items(),
@@ -307,13 +330,18 @@ impl App {
         let current = match kind {
             InputKind::Filter => self.filter.as_ref().map(|(text, _)| text.as_str()),
             InputKind::Find => self.find.as_ref().map(|(text, _)| text.as_str()),
+            InputKind::ExportPath => return self.export_to_file(),
         };
         self.input.set(current.unwrap_or(""));
         self.mode = Mode::Input(kind);
     }
 
+    /// Closes the input bar; cancelling the export file name goes back to the export popup
     pub fn cancel_input(&mut self) {
-        self.mode = Mode::Normal;
+        self.mode = match self.mode {
+            Mode::Input(InputKind::ExportPath) => Mode::ExportMenu,
+            _ => Mode::Normal,
+        };
     }
 
     /// Applies the input; on error the input stays open so it can be corrected
@@ -325,11 +353,117 @@ impl App {
         let result = match kind {
             InputKind::Filter => self.apply_filter(&text),
             InputKind::Find => self.apply_find(&text),
+            InputKind::ExportPath => self.save_export(&text),
         };
         match result {
             Ok(()) => self.mode = Mode::Normal,
             Err(error) => self.error(error),
         }
+    }
+
+    /// Opens the export popup, defaulting to what the current tab shows
+    pub fn open_export(&mut self) {
+        if self.selected_entry().is_none() {
+            self.error("no entry selected");
+            return;
+        }
+        self.export.target = match self.tabbar_state {
+            TabBarState::Request => ExportTarget::RequestBody,
+            TabBarState::Response => ExportTarget::ResponseBody,
+            _ => ExportTarget::FullRequest,
+        };
+        self.export.overwrite_path = None;
+        self.mode = Mode::ExportMenu;
+    }
+
+    pub fn close_export(&mut self) {
+        self.mode = Mode::Normal;
+    }
+
+    pub fn select_export_target(&mut self, target: ExportTarget) {
+        self.export.target = target;
+    }
+
+    pub fn cycle_export_target(&mut self, delta: i32) {
+        let all = ExportTarget::ALL;
+        let index = all.iter().position(|&target| target == self.export.target).unwrap_or(0);
+        let next = (index as i32 + delta).rem_euclid(all.len() as i32) as usize;
+        self.export.target = all[next];
+    }
+
+    pub fn toggle_export_decoded(&mut self) {
+        self.export.decoded = !self.export.decoded;
+    }
+
+    fn build_export(&self) -> Result<export::Exported, String> {
+        let entry = self
+            .selected_entry()
+            .and_then(|index| self.har.log.entries.get(index))
+            .ok_or("no entry selected")?;
+        export::build(
+            entry,
+            self.export.target,
+            self.export.decoded,
+            self.body_options.pretty,
+        )
+    }
+
+    /// Asks for a file name, prefilled with a default under `exports/`
+    pub fn export_to_file(&mut self) {
+        let Some(index) = self.selected_entry() else {
+            self.error("no entry selected");
+            return;
+        };
+        let path = export::default_path(
+            index + 1,
+            &self.har.log.entries[index],
+            self.export.target,
+            self.export.decoded,
+        );
+        self.input.set(&path);
+        self.export.overwrite_path = None;
+        self.mode = Mode::Input(InputKind::ExportPath);
+    }
+
+    /// Writes the export; an existing file is only replaced when the same path is submitted twice
+    pub fn save_export(&mut self, path: &str) -> Result<(), String> {
+        let path = path.trim();
+        if path.is_empty() {
+            return Err("enter a file name".to_string());
+        }
+        let exported = self.build_export()?;
+        let overwrite = self.export.overwrite_path.as_deref() == Some(path);
+        match export::write_file(std::path::Path::new(path), &exported.bytes, overwrite) {
+            Ok(()) => {
+                self.export.overwrite_path = None;
+                self.info(format!("saved {} ({} bytes)", path, exported.bytes.len()));
+                Ok(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                self.export.overwrite_path = Some(path.to_string());
+                Err("file exists: Enter again to overwrite".to_string())
+            }
+            Err(error) => Err(format!("could not save {}: {}", path, error)),
+        }
+    }
+
+    /// Queues the export for the terminal's clipboard (OSC 52)
+    pub fn export_to_clipboard(&mut self) {
+        let result = self.build_export().and_then(|exported| {
+            export::osc52(&exported).map(|sequence| (sequence, exported.bytes.len()))
+        });
+        match result {
+            Ok((sequence, len)) => {
+                self.pending_clipboard = Some(sequence);
+                self.mode = Mode::Normal;
+                self.info(format!("copied {} bytes to the clipboard", len));
+            }
+            Err(error) => self.error(error),
+        }
+    }
+
+    pub fn take_clipboard(&mut self) -> Option<String> {
+        self.pending_clipboard.take()
     }
 
     /// Filters the table; an empty query shows everything again
@@ -959,6 +1093,110 @@ mod tests {
         app.apply_find("alice").expect("valid regex");
 
         assert_ne!(app.preview_key(), before);
+    }
+
+    #[test]
+    fn open_export_defaults_target_to_current_tab() {
+        let mut app = app_from_fixture();
+        app.set_tabbar_state(&TabBarState::Request);
+
+        app.open_export();
+
+        assert_eq!(
+            (app.mode, app.export.target),
+            (Mode::ExportMenu, ExportTarget::RequestBody)
+        );
+    }
+
+    #[test]
+    fn cycle_export_target_wraps_both_ways() {
+        let mut app = app_from_fixture();
+        app.select_export_target(ExportTarget::RequestBody);
+
+        app.cycle_export_target(-1);
+        let wrapped_back = app.export.target;
+        app.cycle_export_target(1);
+
+        assert_eq!(
+            (wrapped_back, app.export.target),
+            (ExportTarget::FullResponse, ExportTarget::RequestBody)
+        );
+    }
+
+    #[test]
+    fn export_to_file_prefills_default_path() {
+        let mut app = app_from_fixture();
+        app.open_export();
+        app.select_export_target(ExportTarget::ResponseBody);
+
+        app.export_to_file();
+
+        assert_eq!(
+            (app.mode, app.input.text()),
+            (
+                Mode::Input(InputKind::ExportPath),
+                "exports/0001-api.example.com-users-response-body.json"
+            )
+        );
+    }
+
+    #[test]
+    fn cancel_input_from_export_path_returns_to_export_menu() {
+        let mut app = app_from_fixture();
+        app.open_export();
+        app.export_to_file();
+
+        app.cancel_input();
+
+        assert_eq!(app.mode, Mode::ExportMenu);
+    }
+
+    #[test]
+    fn save_export_existing_file_needs_second_submit() {
+        let dir = std::env::temp_dir().join(format!("harview-app-test-{}", std::process::id()));
+        let path = dir.join("out.json").to_string_lossy().into_owned();
+        let mut app = app_from_fixture();
+        app.select_export_target(ExportTarget::ResponseBody);
+
+        let first = app.save_export(&path);
+        let second = app.save_export(&path);
+        let third = app.save_export(&path);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+
+        assert_eq!(
+            (first.is_ok(), second.is_err(), third.is_ok()),
+            (true, true, true)
+        );
+    }
+
+    #[test]
+    fn export_to_clipboard_queues_osc52_sequence() {
+        let mut app = app_from_fixture();
+        app.open_export();
+        app.select_export_target(ExportTarget::ResponseBody);
+
+        app.export_to_clipboard();
+
+        let sequence = app.take_clipboard().expect("queued");
+        assert_eq!(
+            (sequence.starts_with("\x1b]52;c;"), app.mode, app.take_clipboard()),
+            (true, Mode::Normal, None)
+        );
+    }
+
+    #[test]
+    fn export_to_clipboard_of_binary_stays_in_menu_with_error() {
+        let mut app = app_from_fixture();
+        app.update_index(8); // the base64 PNG fixture
+        app.open_export();
+        app.select_export_target(ExportTarget::ResponseBody);
+
+        app.export_to_clipboard();
+
+        assert_eq!(
+            (app.mode, app.message.as_ref().map(|m| m.error), app.take_clipboard()),
+            (Mode::ExportMenu, Some(true), None)
+        );
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use crate::app::{App, InputKind, MatchJump, Mode, PreviewCache, TabBarState, WrappedLayout};
 use crate::body::{self, Body, BodyOptions, Processed};
+use crate::export::ExportTarget;
 use crate::handler::KEY_HELP;
 use crate::har::{Entry, Header};
 use crate::syntax::{self, Language};
@@ -25,12 +26,92 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     render_preview(app, main_layout[1], frame.buffer_mut());
     // After the preview, which resolves match jumps and may set a message
     render_status_bar(app, main_layout[2], frame.buffer_mut());
+    if app.mode == Mode::ExportMenu {
+        render_export_menu(app, frame.size(), frame.buffer_mut());
+    }
+}
+
+fn render_export_menu(app: &App, area: Rect, buf: &mut Buffer) {
+    let width = 64.min(area.width);
+    let height = 13.min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    };
+
+    let entry = app
+        .selected_entry()
+        .and_then(|index| app.har.log.entries.get(index).map(|entry| (index, entry)));
+    let title = match entry {
+        Some((index, entry)) => format!(
+            " Export entry {}: {} {} ",
+            index + 1,
+            entry.request.method,
+            entry.request.url.host_str().unwrap_or("")
+        ),
+        None => " Export ".to_string(),
+    };
+
+    let key = |text: &str| Span::styled(text.to_string(), Style::default().fg(Color::LightCyan).bold());
+    let mut lines = vec![Line::default()];
+    for (number, target) in ExportTarget::ALL.iter().enumerate() {
+        let selected = *target == app.export.target;
+        let label = format!(" {} ", target.label());
+        lines.push(Line::from(vec![
+            Span::raw(if selected { " > " } else { "   " }),
+            key(&(number + 1).to_string()),
+            Span::raw(" "),
+            if selected {
+                Span::styled(label, Style::default().reversed())
+            } else {
+                Span::raw(label)
+            },
+        ]));
+    }
+    let body = if app.export.decoded {
+        if app.body_options.pretty {
+            "decoded and pretty printed, as previewed"
+        } else {
+            "decoded, as previewed"
+        }
+    } else {
+        "exactly as stored in the HAR"
+    };
+    lines.extend([
+        Line::default(),
+        Line::from(vec![Span::raw("   "), key("d"), Span::raw(format!(" Body: {}", body))]),
+        Line::default(),
+        Line::from(vec![
+            Span::raw("   "),
+            key("Enter"),
+            Span::raw(" save to file   "),
+            key("c"),
+            Span::raw(" copy to clipboard   "),
+            key("Esc"),
+            Span::raw(" cancel"),
+        ]),
+    ]);
+
+    Widget::render(Clear, popup, buf);
+    Widget::render(
+        Paragraph::new(lines).block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::LightCyan)),
+        ),
+        popup,
+        buf,
+    );
 }
 
 pub fn render_status_bar(app: &App, area: Rect, buf: &mut Buffer) {
     match app.mode {
         Mode::Input(kind) => render_input_bar(app, kind, area, buf),
-        Mode::Normal => render_normal_status(app, area, buf),
+        Mode::Normal => render_normal_status(app, " NORMAL ", area, buf),
+        Mode::ExportMenu => render_normal_status(app, " EXPORT ", area, buf),
     }
 }
 
@@ -49,6 +130,7 @@ fn render_input_bar(app: &App, kind: InputKind, area: Rect, buf: &mut Buffer) {
     let prompt = match kind {
         InputKind::Filter => Span::styled(" / ", Style::default().fg(Color::Black).bg(Color::LightYellow).bold()),
         InputKind::Find => Span::styled(" find ", Style::default().fg(Color::Black).bg(Color::LightMagenta).bold()),
+        InputKind::ExportPath => Span::styled(" save as ", Style::default().fg(Color::Black).bg(Color::LightCyan).bold()),
     };
     // The terminal cursor is hidden, so draw one
     let text = app.input.text();
@@ -60,23 +142,39 @@ fn render_input_bar(app: &App, kind: InputKind, area: Rect, buf: &mut Buffer) {
     let mut rest = rest.chars();
     let under_cursor = rest.next().map_or(" ".to_string(), String::from);
 
-    let left = Line::from(vec![
+    let mut left = Line::from(vec![
         prompt,
         Span::raw(" "),
         Span::raw(before.to_string()),
         Span::styled(under_cursor, Style::default().reversed()),
         Span::raw(rest.as_str().to_string()),
     ]);
-    let right = Line::from(message_span(app).unwrap_or_else(|| {
-        Span::styled(" Enter: apply  Esc: cancel ", Style::default().fg(Color::DarkGray))
-    }))
+    // Errors (invalid query, file exists) must stay visible, so they follow the input
+    // rather than being right-aligned, where a long input would hide them
+    if let Some(message) = message_span(app) {
+        left.spans.push(Span::raw("  "));
+        left.spans.push(message);
+        Widget::render(left, area, buf);
+        return;
+    }
+    let hint = Line::from(Span::styled(
+        " Enter: apply  Esc: cancel ",
+        Style::default().fg(Color::DarkGray),
+    ))
     .right_aligned();
+    render_left_right(left, hint, area, buf);
+}
 
-    Widget::render(right, area, buf);
+/// Draws `left` and right-aligned `right` on one line; when they'd overlap, the left side
+/// (input, messages) wins and the right side is dropped
+fn render_left_right(left: Line, right: Line, area: Rect, buf: &mut Buffer) {
+    if left.width() + right.width() < area.width as usize {
+        Widget::render(right, area, buf);
+    }
     Widget::render(left, area, buf);
 }
 
-fn render_normal_status(app: &App, area: Rect, buf: &mut Buffer) {
+fn render_normal_status(app: &App, badge: &'static str, area: Rect, buf: &mut Buffer) {
     let total = app.max_index();
     let position = if total == 0 { 0 } else { app.get_index() + 1 };
     let count = if total == app.total_entries() {
@@ -86,7 +184,7 @@ fn render_normal_status(app: &App, area: Rect, buf: &mut Buffer) {
     };
 
     let mut left = vec![
-        Span::styled(" NORMAL ", Style::default().fg(Color::Black).bg(Color::LightCyan).bold()),
+        Span::styled(badge, Style::default().fg(Color::Black).bg(Color::LightCyan).bold()),
         Span::raw(" "),
     ];
     match message_span(app) {
@@ -122,8 +220,7 @@ fn render_normal_status(app: &App, area: Rect, buf: &mut Buffer) {
         Span::styled(" ?: help  q: quit ", Style::default().fg(Color::DarkGray)),
     ]);
 
-    Widget::render(Line::from(right).right_aligned(), area, buf);
-    Widget::render(Line::from(left), area, buf);
+    render_left_right(Line::from(left), Line::from(right).right_aligned(), area, buf);
 }
 
 /// "match 2/5", or why nothing is highlighted on this tab
