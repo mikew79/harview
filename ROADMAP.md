@@ -15,7 +15,7 @@ against the synthetic fixtures in `tests/fixtures/`. Tick items off in the same 
 | Search behaviour | An active search **filters** the table to matching entries and highlights matches in both panes. `Esc` clears it. |
 | Export targets | File in `./exports/` (git-ignored) **and** clipboard via OSC 52. |
 | External viewer | `bat` → `batcat` → `$PAGER` → `less`. |
-| Syntax highlighting limit | Skipped for bodies over 200KB; use `b` to view those in the pager. |
+| Syntax highlighting limit | Per language, to keep the UI responsive: JSON / XML up to 200KB, JavaScript / CSS / HTML up to 32KB (syntect's JS-family grammars cost ~3µs per byte, so 200KB of JS blocked for ~0.6s). Larger bodies are shown plain with a note; use `b` to view them in the pager. |
 
 ## Key bindings
 
@@ -39,8 +39,7 @@ Existing keys keep their meaning. New keys are marked ✚.
 | ✚ `x` | Toggle base64 decoding |
 | ✚ `b` | Open current body in external pager |
 | ✚ `e` | Export menu |
-| ✚ `+` / `-` | Resize split |
-| ✚ `z` | Maximise / restore preview |
+| ✚ `z` | Full-screen preview / restore |
 | `q`, `Ctrl-C` | Quit |
 
 ## Phases
@@ -104,14 +103,15 @@ Delivered in three steps, each building and passing tests before the next:
 
 ### Phase 3 — Syntax highlighting
 
-- [ ] Add `syntect` (`default-fancy`)
-- [ ] JSON, HTML, XML, JavaScript, CSS; language picked from MIME type
-- [ ] `s` toggles highlighting
-- [ ] Skipped above 200KB with a status bar hint to use `b`
-- [ ] syntect styles converted to ratatui spans; search highlighting layered on top
-- [ ] Cache the wrapped-line count per width so redrawing huge bodies stays fast
-- [ ] With a filter active, moving between entries costs ~25ms on a 19MB HAR, mostly from rendering the other tabs to find which one has a match; cache rendered tab content or search the plain text instead
-- [ ] Unit tests: language selection, size cut-off
+- [x] Add `syntect` (`default-fancy`, pure Rust; it also pulls in `flate2`, which the backlog's deflate item needs)
+- [x] JSON, HTML, XML, JavaScript, CSS; language picked from MIME type, else sniffed from the content (also used for decoded multi-line form fields such as a SAML assertion). On by default; theme `base16-ocean.dark`, foreground colours only
+- [x] `s` toggles highlighting; the status bar shows `syntax`
+- [x] Size limits per language (see Decisions); skipped bodies show `(syntax highlighting skipped: JavaScript body is over 32KB)`. The hint to use `b` is added in phase 4
+- [x] syntect styles converted to ratatui spans; search highlighting layered on top
+- [x] Wrapped layout cached per preview and width (it used to be recounted every frame), and only the visible lines are copied for rendering
+- [x] Long (≥10KB) ASCII lines, i.e. minified code, are wrapped at exactly the preview width instead of at word boundaries, so their layout is arithmetic and only visible rows are cut out: on a 19MB HAR, moving through entries on the Response tab went from ~20ms to ~12ms per entry; jumping to matches in such lines is exact
+- [x] Finding which other tab has a match renders the tabs without pretty printing or highlighting
+- [x] Unit tests: language detection and sniffing, bundled syntaxes, per-language limits, span conversion, wrapped layout, visible window slicing, hard wrapping
 
 ### Phase 4 — External pager
 
@@ -134,14 +134,13 @@ Delivered in three steps, each building and passing tests before the next:
 - [ ] Clipboard: OSC 52. Over the size cap (~100KB) copy nothing and explain in the status bar. Needs `set -g set-clipboard on` inside tmux
 - [ ] Unit tests: raw HTTP formatting, default filename generation
 
-### Phase 6 — Split-pane extras and docs
+### Phase 6 — Full-screen preview
 
-- [ ] `+` / `-` resize the table / preview split
-- [ ] `z` maximises / restores the preview
-- [ ] README: key bindings, query language, export, pager
+- [ ] `z` toggles the preview (bottom half) to full screen and back; the table is hidden while maximised. Help tab and README list the key
 
 ## Backlog
 
 Ideas that came up during development. Not scheduled into a phase yet.
 
-- [ ] **Inflate deflate-compressed values**, e.g. a SAML HTTP-Redirect `SAMLRequest` in a query string (raw DEFLATE, then base64, then URL-encoding). Would need the `flate2` crate
+- [ ] **Faster moves with a filter active.** On a 19MB HAR, moving between filtered entries still costs ~25-30ms, now mostly from running the search regex over every line of multi-megabyte bodies when the preview is rebuilt. Could highlight only the visible window and count matches lazily
+- [ ] **Inflate deflate-compressed values**, e.g. a SAML HTTP-Redirect `SAMLRequest` in a query string (raw DEFLATE, then base64, then URL-encoding). Would need the `flate2` crate (already in the dependency tree via `syntect`)
