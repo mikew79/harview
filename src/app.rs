@@ -1,33 +1,56 @@
+use crate::body::BodyOptions;
 use mime;
 use ratatui::{prelude::*, widgets::*};
+
+/// Input mode; decides how key events are interpreted.
+/// Later phases add modes for search input, the export menu and the export path prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Normal,
+}
 
 #[derive(Debug)]
 pub struct App {
     pub running: bool,
     index: usize,
     pub har: Har,
+    /// Name of the loaded file, shown in the status bar
+    pub source: String,
+    pub mode: Mode,
     pub tabbar_state: TabBarState,
+    pub body_options: BodyOptions,
     pub preview_scroll: u16,
     /// Built once at startup; the HAR is immutable while viewing
     pub table_items: Vec<TableItem>,
     /// Kept across frames so the table's scroll offset persists
     pub table_state: TableState,
-    /// Preview lines for the current (entry, tab), rebuilt only when either changes
+    /// Preview lines for the current key, rebuilt only when the key changes
     pub preview_cache: Option<PreviewCache>,
+}
+
+/// Everything the preview content depends on
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreviewKey {
+    pub index: usize,
+    pub tab: TabBarState,
+    pub body_options: BodyOptions,
 }
 
 #[derive(Debug)]
 pub struct PreviewCache {
-    pub key: (usize, TabBarState),
+    pub key: PreviewKey,
     pub lines: Vec<Line<'static>>,
 }
 
 impl App {
-    pub fn init(har: Har) -> Self {
+    pub fn init(har: Har, source: String) -> Self {
         Self {
             running: true,
             index: 0,
+            source,
+            mode: Mode::Normal,
             tabbar_state: TabBarState::Headers,
+            body_options: BodyOptions::default(),
             preview_scroll: 0,
             table_items: har.to_table_items(),
             table_state: TableState::default().with_selected(Some(0)),
@@ -77,9 +100,25 @@ impl App {
         self.preview_scroll = (self.preview_scroll as i32 + delta).clamp(0, u16::MAX as i32) as u16;
     }
 
+    pub fn preview_key(&self) -> PreviewKey {
+        PreviewKey {
+            index: self.index,
+            tab: self.tabbar_state,
+            body_options: self.body_options,
+        }
+    }
+
     pub fn set_tabbar_state(&mut self, state: &TabBarState) {
         self.tabbar_state = *state;
         self.preview_scroll = 0;
+    }
+
+    pub fn next_tab(&mut self) {
+        self.set_tabbar_state(&self.tabbar_state.next());
+    }
+
+    pub fn prev_tab(&mut self) {
+        self.set_tabbar_state(&self.tabbar_state.prev());
     }
 
     pub fn quit(&mut self) {
@@ -121,27 +160,45 @@ pub enum TabBarState {
     Cookies,
     Request,
     Response,
+    Help,
 }
 
 impl TabBarState {
+    /// Tab bar order
+    pub const ALL: [TabBarState; 5] = [
+        Self::Headers,
+        Self::Cookies,
+        Self::Request,
+        Self::Response,
+        Self::Help,
+    ];
+
     pub fn to_index(&self) -> usize {
         match self {
             Self::Headers => 0,
             Self::Cookies => 1,
             Self::Request => 2,
             Self::Response => 3,
+            Self::Help => 4,
         }
     }
-}
 
-impl ToString for TabBarState {
-    fn to_string(&self) -> String {
+    pub fn title(&self) -> &'static str {
         match self {
-            Self::Headers => " [1] Headers ".to_string(),
-            Self::Cookies => " [2] Cookies ".to_string(),
-            Self::Request => " [3] Request ".to_string(),
-            Self::Response => " [4] Response ".to_string(),
+            Self::Headers => " [1] Headers ",
+            Self::Cookies => " [2] Cookies ",
+            Self::Request => " [3] Request ",
+            Self::Response => " [4] Response ",
+            Self::Help => " [5/?] Help ",
         }
+    }
+
+    pub fn next(&self) -> Self {
+        Self::ALL[(self.to_index() + 1) % Self::ALL.len()]
+    }
+
+    pub fn prev(&self) -> Self {
+        Self::ALL[(self.to_index() + Self::ALL.len() - 1) % Self::ALL.len()]
     }
 }
 
@@ -223,5 +280,86 @@ impl TableItem {
             Cell::new(shorten_mime),
             Cell::new(size_span),
         ])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app_with_entries(count: usize) -> App {
+        let entry = r#"{
+            "startedDateTime": "2026-10-17T10:00:00Z",
+            "request": {"method": "GET", "url": "https://example.com/"},
+            "response": {"status": 200, "content": {}}
+        }"#;
+        let entries = vec![entry; count].join(",");
+        let har = serde_json::from_str(&format!(r#"{{"log": {{"entries": [{}]}}}}"#, entries))
+            .expect("valid HAR");
+        App::init(har, "test.har".to_string())
+    }
+
+    #[test]
+    fn next_tab_on_last_tab_wraps_to_first() {
+        assert_eq!(TabBarState::Help.next(), TabBarState::Headers);
+    }
+
+    #[test]
+    fn prev_tab_on_first_tab_wraps_to_last() {
+        assert_eq!(TabBarState::Headers.prev(), TabBarState::Help);
+    }
+
+    #[test]
+    fn to_index_matches_position_in_all() {
+        let indexes: Vec<usize> = TabBarState::ALL.iter().map(|tab| tab.to_index()).collect();
+
+        assert_eq!(indexes, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn next_tab_with_scrolled_preview_resets_scroll() {
+        let mut app = app_with_entries(1);
+        app.scroll_preview(5);
+
+        app.next_tab();
+
+        assert_eq!((app.tabbar_state, app.preview_scroll), (TabBarState::Cookies, 0));
+    }
+
+    #[test]
+    fn update_index_past_end_clamps_to_last_entry() {
+        let mut app = app_with_entries(3);
+
+        app.update_index(10);
+
+        assert_eq!(app.get_index(), 2);
+    }
+
+    #[test]
+    fn update_index_before_start_clamps_to_first_entry() {
+        let mut app = app_with_entries(3);
+
+        app.update_index(-10);
+
+        assert_eq!(app.get_index(), 0);
+    }
+
+    #[test]
+    fn update_index_last_with_no_entries_stays_at_zero() {
+        let mut app = app_with_entries(0);
+
+        app.update_index_last();
+
+        assert_eq!(app.get_index(), 0);
+    }
+
+    #[test]
+    fn preview_key_after_tab_change_differs() {
+        let mut app = app_with_entries(1);
+        let before = app.preview_key();
+
+        app.next_tab();
+
+        assert_ne!(app.preview_key(), before);
     }
 }

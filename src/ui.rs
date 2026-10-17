@@ -1,15 +1,44 @@
-use crate::app::{App, PreviewCache, TabBarState};
+use crate::app::{App, Mode, PreviewCache, TabBarState};
+use crate::body::{self, Body, BodyOptions, Processed};
+use crate::handler::KEY_HELP;
 use crate::har::{Entry, Header};
 use ratatui::{prelude::*, widgets::*};
 
 pub fn render(app: &mut App, frame: &mut Frame) {
     let main_layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Fill(1), Constraint::Fill(1)])
+        .constraints([
+            Constraint::Fill(1),
+            Constraint::Fill(1),
+            Constraint::Length(1),
+        ])
         .split(frame.size());
 
     render_table(app, main_layout[0], frame.buffer_mut());
     render_preview(app, main_layout[1], frame.buffer_mut());
+    render_status_bar(app, main_layout[2], frame.buffer_mut());
+}
+
+pub fn render_status_bar(app: &App, area: Rect, buf: &mut Buffer) {
+    let mode = match app.mode {
+        Mode::Normal => " NORMAL ",
+    };
+    let total = app.max_index();
+    let position = if total == 0 { 0 } else { app.get_index() + 1 };
+
+    let left = Line::from(vec![
+        Span::styled(mode, Style::default().fg(Color::Black).bg(Color::LightCyan).bold()),
+        Span::raw(" "),
+        Span::raw(app.source.clone()),
+    ]);
+    let right = Line::from(vec![
+        Span::raw(format!("{}/{} ", position, total)),
+        Span::styled(" ?: help  q: quit ", Style::default().fg(Color::DarkGray)),
+    ])
+    .right_aligned();
+
+    Widget::render(left, area, buf);
+    Widget::render(right, area, buf);
 }
 
 pub fn render_table(app: &mut App, area: Rect, buf: &mut Buffer) {
@@ -48,7 +77,7 @@ pub fn render_table(app: &mut App, area: Rect, buf: &mut Buffer) {
 }
 
 pub fn render_preview(app: &mut App, area: Rect, buf: &mut Buffer) {
-    let key = (app.get_index(), app.tabbar_state);
+    let key = app.preview_key();
     if app.preview_cache.as_ref().map(|cache| cache.key) != Some(key) {
         app.preview_cache = Some(PreviewCache {
             key,
@@ -97,26 +126,49 @@ pub fn render_preview(app: &mut App, area: Rect, buf: &mut Buffer) {
 }
 
 fn preview_lines(app: &App) -> Vec<Line<'static>> {
+    if app.tabbar_state == TabBarState::Help {
+        return help_lines();
+    }
     match app.har.log.entries.get(app.get_index()) {
         Some(entry) => match app.tabbar_state {
             TabBarState::Headers => headers_lines(entry),
             TabBarState::Cookies => cookies_lines(entry),
-            TabBarState::Request => request_lines(entry),
-            TabBarState::Response => response_lines(entry),
+            TabBarState::Request => request_lines(entry, app.body_options),
+            TabBarState::Response => response_lines(entry, app.body_options),
+            TabBarState::Help => help_lines(),
         },
         None => vec![placeholder("No entry selected")],
     }
 }
 
 fn tabbar(state: TabBarState) -> Tabs<'static> {
-    Tabs::new(vec![
-        " [1] Headers ",
-        " [2] Cookies ",
-        " [3] Request ",
-        " [4] Response ",
-    ])
-    .select(state.to_index())
-    .padding(" ", " ")
+    Tabs::new(TabBarState::ALL.iter().map(|tab| tab.title()).collect::<Vec<_>>())
+        .select(state.to_index())
+        .padding(" ", " ")
+}
+
+fn help_lines() -> Vec<Line<'static>> {
+    let width = KEY_HELP
+        .iter()
+        .flat_map(|(_, keys)| keys.iter().map(|(key, _)| key.len()))
+        .max()
+        .unwrap_or(0);
+
+    let mut lines = Vec::new();
+    for (title, keys) in KEY_HELP {
+        lines.push(section(title));
+        lines.extend(keys.iter().map(|(key, action)| {
+            Line::from(vec![
+                Span::styled(
+                    format!("  {:<width$}  ", key, width = width),
+                    Style::default().fg(Color::LightCyan).bold(),
+                ),
+                Span::raw(*action),
+            ])
+        }));
+        lines.push(Line::default());
+    }
+    lines
 }
 
 fn section(title: &str) -> Line<'static> {
@@ -248,7 +300,7 @@ fn cookies_lines(entry: &Entry) -> Vec<Line<'static>> {
     lines
 }
 
-fn request_lines(entry: &Entry) -> Vec<Line<'static>> {
+fn request_lines(entry: &Entry, options: BodyOptions) -> Vec<Line<'static>> {
     let req = &entry.request;
     let mut lines = vec![
         section("Request"),
@@ -271,14 +323,18 @@ fn request_lines(entry: &Entry) -> Vec<Line<'static>> {
                 ));
             }
             lines.push(section("Body"));
-            lines.extend(body_lines(&post_data.text));
+            let request_body = Body {
+                text: Some(&post_data.text),
+                encoding: None,
+            };
+            lines.extend(processed_lines(body::process(&request_body, options)));
         }
         None => lines.push(placeholder("(no request body)")),
     }
     lines
 }
 
-fn response_lines(entry: &Entry) -> Vec<Line<'static>> {
+fn response_lines(entry: &Entry, options: BodyOptions) -> Vec<Line<'static>> {
     let resp = &entry.response;
     let content = &resp.content;
     let mut lines = vec![
@@ -302,32 +358,22 @@ fn response_lines(entry: &Entry) -> Vec<Line<'static>> {
     lines.push(Line::default());
     lines.push(section("Body"));
 
-    match &content.text {
-        Some(text) if content.encoding.as_deref() == Some("base64") => {
-            lines.push(placeholder(&format!(
-                "(base64-encoded body, {} chars - not decoded)",
-                text.len()
-            )));
-        }
-        Some(text) => lines.extend(body_lines(text)),
-        None => lines.push(placeholder("(body not captured in HAR)")),
-    }
+    let response_body = Body {
+        text: content.text.as_deref(),
+        encoding: content.encoding.as_deref(),
+    };
+    lines.extend(processed_lines(body::process(&response_body, options)));
     lines
 }
 
-/// Pretty-prints JSON bodies; anything else is shown as-is.
-fn body_lines(text: &str) -> Vec<Line<'static>> {
-    if text.is_empty() {
-        return vec![placeholder("(empty)")];
+fn processed_lines(processed: Processed) -> Vec<Line<'static>> {
+    match processed {
+        Processed::Text(text) => text.lines().map(|line| Line::from(line.to_string())).collect(),
+        Processed::Empty => vec![placeholder("(empty)")],
+        Processed::NotCaptured => vec![placeholder("(body not captured in HAR)")],
+        Processed::Encoded { encoding, len } => vec![placeholder(&format!(
+            "({}-encoded body, {} chars - not decoded)",
+            encoding, len
+        ))],
     }
-    let pretty = serde_json::from_str::<serde_json::Value>(text)
-        .ok()
-        .and_then(|value| serde_json::to_string_pretty(&value).ok());
-
-    pretty
-        .as_deref()
-        .unwrap_or(text)
-        .lines()
-        .map(|line| Line::from(line.to_string()))
-        .collect()
 }

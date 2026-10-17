@@ -193,3 +193,60 @@ pub struct Timings {
     pub wait: Option<f64>,
     pub receive: Option<f64>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name)
+    }
+
+    #[tokio::test]
+    async fn from_file_sample_loads_all_entries() {
+        let har = Har::from_file(&fixture("sample.har")).await.expect("sample parses");
+
+        assert_eq!(har.log.entries.len(), 10);
+    }
+
+    #[tokio::test]
+    async fn from_file_fractional_page_timings_parses() {
+        let har = Har::from_file(&fixture("sample.har")).await.expect("sample parses");
+
+        let timings = &har.log.pages.expect("pages present")[0].page_timings;
+        assert_eq!((timings.on_content_load, timings.on_load), (123.45, 234.5));
+    }
+
+    #[tokio::test]
+    async fn from_file_missing_optional_fields_uses_defaults() {
+        let har = Har::from_file(&fixture("minimal.har")).await.expect("minimal parses");
+
+        let entry = &har.log.entries[0];
+        assert_eq!(
+            (
+                entry.request.headers.len(),
+                entry.request.body_size,
+                entry.response.redirect_url.as_str(),
+                entry.response.content.text.is_none(),
+            ),
+            (0, -1, "", true)
+        );
+    }
+
+    #[tokio::test]
+    async fn from_file_empty_har_has_no_entries() {
+        let har = Har::from_file(&fixture("empty.har")).await.expect("empty parses");
+
+        assert!(har.log.entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn from_file_missing_file_returns_error() {
+        let result = Har::from_file(&fixture("does-not-exist.har")).await;
+
+        assert!(result.is_err());
+    }
+}
