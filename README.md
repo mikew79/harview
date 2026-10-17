@@ -71,6 +71,8 @@ TUI can be controlled with the following keys:
 | `u` /  `d` | Move the focus up / down more fast |
 | `g` / `G` | Jump to the first / last entry |
 | `1` - `4` | Switch preview widget tab |
+| `5` / `?` | Show the Help tab |
+| `Tab` / `Shift-Tab` | Next / previous tab |
 | `J` / `K`, `PgDn` / `PgUp` | Scroll the preview |
 | `q` or `Ctrl-C` | Quit application |
 

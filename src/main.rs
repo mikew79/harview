@@ -1,4 +1,5 @@
 mod app;
+mod body;
 mod event;
 mod handler;
 mod har;
@@ -33,7 +34,12 @@ async fn main() -> anyhow::Result<()> {
     let har = Har::from_file(args.path.as_path())
         .await
         .context("failed to parse HAR file")?;
-    let mut app = app::App::init(har);
+    let source = args
+        .path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut app = app::App::init(har, source);
     run(&mut app).await?;
 
     Ok(())
@@ -60,7 +66,7 @@ async fn event_loop<B: Backend>(tui: &mut tui::Tui<B>, app: &mut app::App) -> an
             // Nothing changes on a tick, so skip the redraw
             event::Event::Tick => app.tick(),
             event::Event::Key(key_event) => {
-                if let Some(command) = handler::handle_key_events(key_event) {
+                if let Some(command) = handler::handle_key_events(key_event, app.mode) {
                     command.exec(app);
                 }
                 tui.draw(app)?;

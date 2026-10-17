@@ -4,3 +4,5 @@
 /data/
 *.har
 *:Zone.Identifier
+# Synthetic test fixtures only - never put real captures here
+!/tests/fixtures/*.har

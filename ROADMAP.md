@@ -48,14 +48,14 @@ Existing keys keep their meaning. New keys are marked ✚.
 
 Structure that later phases plug into. No user-visible change apart from the Help tab and status bar.
 
-- [ ] Input modes: `enum Mode { Normal, SearchInput, ExportMenu, ExportPath }`; `handler.rs` dispatches by mode
-- [ ] One-line status / input bar at the bottom of the screen
-- [ ] Help tab (`5` / `?`) listing key bindings and query syntax
-- [ ] `Tab` / `Shift-Tab` cycle tabs
-- [ ] `body.rs` pipeline: `raw → decode → pretty → highlight → search-highlight → Vec<Line>`, shared by preview, export and pager (initially just today's JSON pretty printing)
-- [ ] Preview cache key extended to cover the pipeline toggles
-- [ ] Synthetic fixtures in `tests/fixtures/` (minified JS, JSON, XML, HTML, base64 text, base64 binary, missing optional fields, empty HAR)
-- [ ] First unit tests (`#[cfg(test)]` modules)
+- [x] Input modes: `enum Mode` with `handler.rs` dispatching by mode. Only `Normal` exists so far; `SearchInput`, `ExportMenu` and `ExportPath` are added by the phases that use them
+- [x] One-line status bar at the bottom of the screen (mode, file name, entry position, hints)
+- [x] Help tab (`5` / `?`) listing key bindings, generated from `handler::KEY_HELP` (query syntax added in phase 2)
+- [x] `Tab` / `Shift-Tab` cycle tabs
+- [x] `body.rs` pipeline (`raw → decode → pretty → …`), UI-free so export and pager can reuse it; `ui.rs` turns its `Processed` result into lines. Currently JSON pretty printing only
+- [x] Preview cache key (`PreviewKey`) covers entry, tab and `BodyOptions`
+- [x] Synthetic fixtures in `tests/fixtures/` (`sample.har`: JSON, form post, minified JS, XML, HTML, CSS, base64 text, base64 PNG, missing body; `minimal.har`; `empty.har`). `.gitignore` excludes `*.har` except this folder
+- [x] First unit tests (`#[cfg(test)]` modules in `app`, `body`, `handler`, `har`) — run with `cargo test`
 
 ### Phase 1 — Base64 decoding and XML/HTML pretty printing
 
