@@ -31,8 +31,18 @@ pub fn render_status_bar(app: &App, area: Rect, buf: &mut Buffer) {
         Span::raw(" "),
         Span::raw(app.source.clone()),
     ]);
+    let flag = |label: &'static str, on: bool| {
+        let style = if on {
+            Style::default().fg(Color::LightGreen)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        Span::styled(label, style)
+    };
     let right = Line::from(vec![
-        Span::raw(format!("{}/{} ", position, total)),
+        flag("pretty ", app.body_options.pretty),
+        flag("decode ", app.body_options.decode),
+        Span::raw(format!(" {}/{} ", position, total)),
         Span::styled(" ?: help  q: quit ", Style::default().fg(Color::DarkGray)),
     ])
     .right_aligned();
@@ -131,7 +141,7 @@ fn preview_lines(app: &App) -> Vec<Line<'static>> {
     }
     match app.har.log.entries.get(app.get_index()) {
         Some(entry) => match app.tabbar_state {
-            TabBarState::Headers => headers_lines(entry),
+            TabBarState::Headers => headers_lines(entry, app.body_options),
             TabBarState::Cookies => cookies_lines(entry),
             TabBarState::Request => request_lines(entry, app.body_options),
             TabBarState::Response => response_lines(entry, app.body_options),
@@ -205,6 +215,40 @@ fn pairs_section(title: &str, pairs: Vec<(&str, &str)>) -> Vec<Line<'static>> {
     lines
 }
 
+/// Like `pairs_section`, but values are decoded (URL, base64) when decoding is on
+fn fields_section(title: &str, pairs: Vec<(&str, &str)>, options: BodyOptions) -> Vec<Line<'static>> {
+    let mut lines = vec![section(&format!("{} ({})", title, pairs.len()))];
+    if pairs.is_empty() {
+        lines.push(placeholder("(none)"));
+    }
+    for (name, value) in pairs {
+        let name = if options.decode {
+            body::percent_decode(name, true)
+        } else {
+            name.into()
+        };
+        let field = body::decode_field(value, options);
+
+        let mut label = vec![Span::styled(
+            format!("{}: ", name),
+            Style::default().fg(Color::LightCyan).bold(),
+        )];
+        if field.base64 {
+            label.push(Span::styled("[base64] ", Style::default().fg(Color::LightGreen)));
+        }
+        // Multi-line values (e.g. a decoded, pretty printed SAML assertion) go below the name
+        if field.text.contains('\n') {
+            lines.push(Line::from(label));
+            lines.extend(field.text.lines().map(|line| Line::from(format!("  {}", line))));
+        } else {
+            label.push(Span::raw(field.text.into_owned()));
+            lines.push(Line::from(label));
+        }
+    }
+    lines.push(Line::default());
+    lines
+}
+
 fn header_pairs(headers: &[Header]) -> Vec<(&str, &str)> {
     headers
         .iter()
@@ -227,7 +271,7 @@ fn opt_bytes(value: Option<i64>) -> String {
     }
 }
 
-fn headers_lines(entry: &Entry) -> Vec<Line<'static>> {
+fn headers_lines(entry: &Entry, options: BodyOptions) -> Vec<Line<'static>> {
     let req = &entry.request;
     let resp = &entry.response;
     let t = &entry.timings;
@@ -266,12 +310,13 @@ fn headers_lines(entry: &Entry) -> Vec<Line<'static>> {
     }
     lines.push(Line::default());
 
-    lines.extend(pairs_section(
+    lines.extend(fields_section(
         "Query Parameters",
         req.query_string
             .iter()
             .map(|q| (q.name.as_str(), q.value.as_str()))
             .collect(),
+        options,
     ));
     lines.extend(pairs_section("Response Headers", header_pairs(&resp.headers)));
     lines.extend(pairs_section("Request Headers", header_pairs(&req.headers)));
@@ -313,19 +358,27 @@ fn request_lines(entry: &Entry, options: BodyOptions) -> Vec<Line<'static>> {
         Some(post_data) => {
             lines.push(key_value("Content Type", &post_data.mime_type));
             lines.push(Line::default());
-            if let Some(params) = &post_data.params {
-                lines.extend(pairs_section(
-                    "Form Parameters",
+            // Not every exporter records `params`, so fall back to parsing a form body
+            let params: Option<Vec<(&str, &str)>> = match &post_data.params {
+                Some(params) if !params.is_empty() => Some(
                     params
                         .iter()
                         .map(|p| (p.name.as_str(), p.value.as_str()))
                         .collect(),
-                ));
+                ),
+                _ if body::is_form_urlencoded(&post_data.mime_type) => {
+                    Some(body::form_fields(&post_data.text))
+                }
+                _ => None,
+            };
+            if let Some(params) = params {
+                lines.extend(fields_section("Form Parameters", params, options));
             }
             lines.push(section("Body"));
             let request_body = Body {
                 text: Some(&post_data.text),
                 encoding: None,
+                mime_type: Some(&post_data.mime_type),
             };
             lines.extend(processed_lines(body::process(&request_body, options)));
         }
@@ -361,6 +414,7 @@ fn response_lines(entry: &Entry, options: BodyOptions) -> Vec<Line<'static>> {
     let response_body = Body {
         text: content.text.as_deref(),
         encoding: content.encoding.as_deref(),
+        mime_type: content.mime_type.as_deref(),
     };
     lines.extend(processed_lines(body::process(&response_body, options)));
     lines
@@ -372,8 +426,33 @@ fn processed_lines(processed: Processed) -> Vec<Line<'static>> {
         Processed::Empty => vec![placeholder("(empty)")],
         Processed::NotCaptured => vec![placeholder("(body not captured in HAR)")],
         Processed::Encoded { encoding, len } => vec![placeholder(&format!(
-            "({}-encoded body, {} chars - not decoded)",
+            "({}-encoded body, {} chars - press x to decode)",
             encoding, len
         ))],
+        Processed::InvalidEncoding { encoding, error } => vec![placeholder(&format!(
+            "(could not decode {} body: {})",
+            encoding, error
+        ))],
+        Processed::Binary(bytes) => binary_lines(&bytes),
     }
+}
+
+/// Larger binaries are truncated; use the pager or export to see everything
+const HEX_DUMP_LIMIT: usize = 4096;
+
+fn binary_lines(bytes: &[u8]) -> Vec<Line<'static>> {
+    let mut lines = vec![placeholder(&format!("(binary content, {} bytes)", bytes.len()))];
+    lines.push(Line::default());
+    lines.extend(
+        body::hex_dump(bytes, HEX_DUMP_LIMIT)
+            .into_iter()
+            .map(|line| Line::styled(line, Style::default().fg(Color::Gray))),
+    );
+    if bytes.len() > HEX_DUMP_LIMIT {
+        lines.push(placeholder(&format!(
+            "... {} more bytes not shown",
+            bytes.len() - HEX_DUMP_LIMIT
+        )));
+    }
+    lines
 }

@@ -7,11 +7,13 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.86"
+base64 = "0.23.1"
 byte-unit = "5.1.4"
 clap = { version = "4.5.9", features = ["derive"] }
 crossterm = { version = "0.27.0", features = ["event-stream"] }
 futures = "0.3.30"
 mime = "0.3.17"
+quick-xml = "0.42.0"
 ratatui = { version = "0.26.0", features = ["unstable-rendered-line-info"] }
 serde = { version = "1.0.203", features = ["derive"] }
 serde_derive = "1.0.203"
