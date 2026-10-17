@@ -128,7 +128,7 @@ Delivered in three steps, each building and passing tests before the next:
 
 ### Phase 6 — Full-screen preview
 
-- [ ] `z` toggles the preview (bottom half) to full screen and back; the table is hidden while maximised. Help tab and README list the key
+- [x] `z` toggles the preview (bottom half) to full screen and back; the table is hidden while maximised and keeps its selection and scroll position, and `j` / `k` still move between entries (the status bar shows which). The preview border shows `z: full screen` / `z: restore`. Help tab and README list the key
 
 ## Backlog
 
@@ -139,5 +139,12 @@ Ideas that came up during development. Not scheduled into a phase yet.
   - Temp file with owner-only permissions (`0600`), deleted afterwards even when the pager fails
   - Without `bat` installed, `less` shows the body without highlighting
 
+- [ ] **Copy as curl.** Turn the selected request into a `curl` command, like the browser DevTools' "Copy as cURL", to replay or tweak it from a shell. Fits as a fifth export target, so it gets the clipboard and file destinations for free. To explore:
+  - Shell quoting: single-quote every argument (`'` becomes `'\''`); DevTools also offers Windows `cmd` / PowerShell variants, which quote differently
+  - Method: `-X` only when curl wouldn't infer it (e.g. not for GET, or POST with a body)
+  - Headers: drop HTTP/2 pseudo-headers (`:authority`, `:method`, ...) and `Content-Length`; turn `Accept-Encoding` into `--compressed`; optionally `--http2` from the HTTP version
+  - Body: `--data-raw` for text; binary or very large bodies need `--data-binary @file`, which pairs with exporting the body to a file; `multipart/form-data` as `--form` fields
+  - Secrets: the command carries cookies and `Authorization` headers; consider an option to leave them out (or replace them with placeholders) when sharing
+  - **Preferred output: a bash script** rather than only a clipboard copy. Save the request as an executable `.sh` file (e.g. `exports/0012-api.example.com-login-request.sh`) with a `#!/usr/bin/env bash` shebang and `set -euo pipefail`, the curl command split one option per line for readability, and owner-only, executable permissions (`0700`). Secrets could become variables at the top of the script (`TOKEN=...`, `COOKIE=...`), so they're easy to swap or read from the environment instead. A binary or large body can sit next to the script as a file it references
 - [ ] **Faster moves with a filter active.** On a 19MB HAR, moving between filtered entries still costs ~25-30ms, now mostly from running the search regex over every line of multi-megabyte bodies when the preview is rebuilt. Could highlight only the visible window and count matches lazily
 - [ ] **Inflate deflate-compressed values**, e.g. a SAML HTTP-Redirect `SAMLRequest` in a query string (raw DEFLATE, then base64, then URL-encoding). Would need the `flate2` crate (already in the dependency tree via `syntect`)

@@ -7,5 +7,6 @@
 # Synthetic test fixtures only - never put real captures here
 !/tests/fixtures/*.har
 
-# Exported requests / responses may contain cookies, tokens and other sensitive data
-/exports/
+# Exported requests / responses may contain cookies, tokens and other sensitive data.
+# No leading slash: harview writes exports/ in whichever directory it is run from
+exports/
