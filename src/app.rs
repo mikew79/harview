@@ -113,6 +113,16 @@ impl App {
         self.preview_scroll = 0;
     }
 
+    pub fn toggle_pretty(&mut self) {
+        self.body_options.pretty = !self.body_options.pretty;
+        self.preview_scroll = 0;
+    }
+
+    pub fn toggle_decode(&mut self) {
+        self.body_options.decode = !self.body_options.decode;
+        self.preview_scroll = 0;
+    }
+
     pub fn next_tab(&mut self) {
         self.set_tabbar_state(&self.tabbar_state.next());
     }
@@ -351,6 +361,36 @@ mod tests {
         app.update_index_last();
 
         assert_eq!(app.get_index(), 0);
+    }
+
+    #[test]
+    fn toggle_decode_flips_option_and_resets_scroll() {
+        let mut app = app_with_entries(1);
+        app.scroll_preview(5);
+
+        app.toggle_decode();
+
+        assert_eq!((app.body_options.decode, app.preview_scroll), (true, 0));
+    }
+
+    #[test]
+    fn toggle_pretty_twice_restores_default() {
+        let mut app = app_with_entries(1);
+
+        app.toggle_pretty();
+        app.toggle_pretty();
+
+        assert_eq!(app.body_options, BodyOptions::default());
+    }
+
+    #[test]
+    fn preview_key_after_toggle_decode_differs() {
+        let mut app = app_with_entries(1);
+        let before = app.preview_key();
+
+        app.toggle_decode();
+
+        assert_ne!(app.preview_key(), before);
     }
 
     #[test]

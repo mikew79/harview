@@ -59,13 +59,16 @@ Structure that later phases plug into. No user-visible change apart from the Hel
 
 ### Phase 1 — Base64 decoding and XML/HTML pretty printing
 
-- [ ] Add `base64`, `quick-xml`
-- [ ] `x` toggles decoding of `encoding: "base64"` bodies
-- [ ] Decoded binary (fonts, images) shown as a summary + hex dump, not raw bytes
-- [ ] Decoded UTF-8 text flows on through pretty printing
-- [ ] XML / HTML pretty printing via `quick-xml`; falls back to raw text when the markup doesn't parse
-- [ ] `p` toggles pretty printing (raw view)
-- [ ] Unit tests: decode text / binary / invalid base64, XML and HTML formatting, fallback
+- [x] Add `base64`, `quick-xml`
+- [x] `x` toggles decoding of `encoding: "base64"` bodies (off by default; the placeholder hints at `x`)
+- [x] Decoded binary (fonts, images) shown as a size summary + hex dump of the first 4KB, not raw bytes. Text containing NUL bytes counts as binary
+- [x] Decoded UTF-8 text flows on through pretty printing
+- [x] XML / HTML pretty printing via `quick-xml`, picked by MIME type (`BodyKind`); falls back to raw text when the markup doesn't parse. HTML is best effort: void elements, `script`/`style`/`pre`/`textarea` content and mismatched end tags are handled. JSON is still tried for unknown types
+- [x] `p` toggles pretty printing (raw view)
+- [x] Status bar shows the `pretty` / `decode` toggles (green = on)
+- [x] Unit tests: decode text / binary / invalid base64, XML and HTML formatting, fallback, MIME detection, hex dump
+- [x] `x` also decodes request data the HAR doesn't mark as encoded: form fields (from `params`, or parsed from a form body) and query parameters are URL-decoded, then base64-decoded (standard or URL-safe, padding optional) when that yields readable text, and pretty printed — e.g. a SAML `SAMLResponse`. Decoded fields are tagged `[base64]`; opaque tokens (binary results, values under 16 chars) are left alone. Whole bodies that look like base64 are decoded the same way
+- [x] Fix: accept `null` where Chrome writes it (e.g. `pageTimings.onLoad` when the page hadn't finished loading, plus optional sizes, strings and lists); new `tests/fixtures/nulls.har`
 
 ### Phase 2 — Search and filter
 
@@ -84,7 +87,7 @@ The riskiest phase: introduces a filtered view, which changes how the selection 
   method:POST
   size:>100k  dur:>500ms        size / duration with units
   ```
-- [ ] Bodies are searched in decoded form (base64 included)
+- [ ] Bodies, form fields and query parameters are searched in decoded form (base64 included)
 - [ ] Matches highlighted in table rows and preview lines
 - [ ] `n` / `N` jump between matches in the preview (scrolls to the match)
 - [ ] Status bar shows the active query and `matched / total`
@@ -126,3 +129,10 @@ The riskiest phase: introduces a filtered view, which changes how the selection 
 - [ ] `+` / `-` resize the table / preview split
 - [ ] `z` maximises / restores the preview
 - [ ] README: key bindings, query language, export, pager
+
+## Backlog
+
+Ideas that came up during development. Not scheduled into a phase yet.
+
+- [ ] **Find in preview.** Search *within* the content currently shown in the preview pane, including decoded and pretty printed content such as a base64 `SAMLResponse` expanded into a SAML assertion. Separate from the phase 2 search, which filters the entries table: this one jumps between matches inside a single entry's preview (e.g. `Ctrl-F` or `/` while the preview is focused, with `n` / `N`), so the text being searched is exactly what's on screen after decoding. Could share phase 2's regex compilation and match highlighting
+- [ ] **Inflate deflate-compressed values**, e.g. a SAML HTTP-Redirect `SAMLRequest` in a query string (raw DEFLATE, then base64, then URL-encoding). Would need the `flate2` crate

@@ -73,6 +73,8 @@ TUI can be controlled with the following keys:
 | `1` - `4` | Switch preview widget tab |
 | `5` / `?` | Show the Help tab |
 | `Tab` / `Shift-Tab` | Next / previous tab |
+| `p` | Toggle pretty printing (JSON, XML, HTML) |
+| `x` | Toggle decoding: base64 bodies (binary is shown as a hex dump), and URL-encoded / base64 form fields and query parameters such as a `SAMLResponse` |
 | `J` / `K`, `PgDn` / `PgUp` | Scroll the preview |
 | `q` or `Ctrl-C` | Quit application |
 

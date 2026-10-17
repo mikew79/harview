@@ -16,6 +16,22 @@ fn unknown_size() -> i64 {
     -1
 }
 
+/// Some exporters (e.g. Chrome) write `null` instead of leaving a field out
+fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Option::unwrap_or_default)
+}
+
+fn null_as_unknown_size<'de, D>(deserializer: D) -> Result<i64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<i64>::deserialize(deserializer).map(|size| size.unwrap_or_else(unknown_size))
+}
+
 fn deserialize_url<'de, D>(deserializer: D) -> Result<Url, D::Error>
 where
     D: Deserializer<'de>,
@@ -66,8 +82,11 @@ pub struct Page {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PageTimings {
-    pub on_content_load: f64,
-    pub on_load: f64,
+    /// `null` or missing when the page hadn't finished loading at export time
+    #[serde(default)]
+    pub on_content_load: Option<f64>,
+    #[serde(default)]
+    pub on_load: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -76,11 +95,11 @@ pub struct Entry {
     pub started_date_time: String,
     pub request: Request,
     pub response: Response,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub cache: Cache,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub timings: Timings,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub time: f64,
     #[serde(rename = "_securityState")]
     pub security_state: Option<String>,
@@ -93,20 +112,20 @@ pub struct Entry {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Request {
-    #[serde(default = "unknown_size")]
+    #[serde(default = "unknown_size", deserialize_with = "null_as_unknown_size")]
     pub body_size: i64,
     pub method: String,
     #[serde(deserialize_with = "deserialize_url")]
     pub url: url::Url,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub http_version: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub headers: Vec<Header>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub cookies: Vec<Cookie>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub query_string: Vec<QueryString>,
-    #[serde(default = "unknown_size")]
+    #[serde(default = "unknown_size", deserialize_with = "null_as_unknown_size")]
     pub headers_size: i64,
     pub post_data: Option<PostData>,
 }
@@ -137,7 +156,7 @@ pub struct QueryString {
 pub struct PostData {
     pub mime_type: String,
     pub params: Option<Vec<Param>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub text: String,
 }
 
@@ -152,20 +171,20 @@ pub struct Param {
 #[serde(rename_all = "camelCase")]
 pub struct Response {
     pub status: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub status_text: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub http_version: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub headers: Vec<Header>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub cookies: Vec<Cookie>,
     pub content: Content,
-    #[serde(rename = "redirectURL", default)]
+    #[serde(rename = "redirectURL", default, deserialize_with = "null_as_default")]
     pub redirect_url: String,
-    #[serde(default = "unknown_size")]
+    #[serde(default = "unknown_size", deserialize_with = "null_as_unknown_size")]
     pub headers_size: i64,
-    #[serde(default = "unknown_size")]
+    #[serde(default = "unknown_size", deserialize_with = "null_as_unknown_size")]
     pub body_size: i64,
 }
 
@@ -209,7 +228,7 @@ mod tests {
     async fn from_file_sample_loads_all_entries() {
         let har = Har::from_file(&fixture("sample.har")).await.expect("sample parses");
 
-        assert_eq!(har.log.entries.len(), 10);
+        assert_eq!(har.log.entries.len(), 11);
     }
 
     #[tokio::test]
@@ -217,7 +236,7 @@ mod tests {
         let har = Har::from_file(&fixture("sample.har")).await.expect("sample parses");
 
         let timings = &har.log.pages.expect("pages present")[0].page_timings;
-        assert_eq!((timings.on_content_load, timings.on_load), (123.45, 234.5));
+        assert_eq!((timings.on_content_load, timings.on_load), (Some(123.45), Some(234.5)));
     }
 
     #[tokio::test]
@@ -233,6 +252,32 @@ mod tests {
                 entry.response.content.text.is_none(),
             ),
             (0, -1, "", true)
+        );
+    }
+
+    #[tokio::test]
+    async fn from_file_null_page_on_load_parses_as_none() {
+        let har = Har::from_file(&fixture("nulls.har")).await.expect("nulls parses");
+
+        let timings = &har.log.pages.expect("pages present")[0].page_timings;
+        assert_eq!((timings.on_content_load, timings.on_load), (Some(1287.2), None));
+    }
+
+    #[tokio::test]
+    async fn from_file_null_optional_fields_use_defaults() {
+        let har = Har::from_file(&fixture("nulls.har")).await.expect("nulls parses");
+
+        let entry = &har.log.entries[0];
+        assert_eq!(
+            (
+                entry.time,
+                entry.request.headers.len(),
+                entry.request.body_size,
+                entry.response.status_text.as_str(),
+                entry.response.redirect_url.as_str(),
+                entry.response.body_size,
+            ),
+            (0.0, 0, -1, "", "", -1)
         );
     }
 
