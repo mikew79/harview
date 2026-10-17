@@ -30,6 +30,8 @@ The goal of this tool is not to provide in-depth analysis capabilities like DevT
 - **Usability fixes:** table scroll position is kept, mouse capture is disabled so terminal text selection works, unknown sizes (`-1`) are shown as `-`, and the terminal is always restored on exit, even after an error.
 - **No crash on an empty HAR** when jumping to the last entry.
 
+Planned features and their progress are tracked in [ROADMAP.md](ROADMAP.md).
+
 ## Usage
 
 ### Export HAR files from Browsers
