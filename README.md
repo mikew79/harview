@@ -76,7 +76,33 @@ TUI can be controlled with the following keys:
 | `p` | Toggle pretty printing (JSON, XML, HTML) |
 | `x` | Toggle decoding: base64 bodies (binary is shown as a hex dump), and URL-encoded / base64 form fields and query parameters such as a `SAMLResponse` |
 | `J` / `K`, `PgDn` / `PgUp` | Scroll the preview |
+| `/` | Filter entries with a query (see below) |
+| `f` | Find in the preview, without filtering the table |
+| `n` / `N` | Next / previous match in the preview |
+| `Esc` | Clear find, then the filter |
 | `q` or `Ctrl-C` | Quit application |
+
+#### Search queries
+
+Press `/`, type a query and press `Enter`. Terms are combined with AND, and `!` negates a term.
+Regexes are case-insensitive unless they contain an uppercase letter. Bodies, form fields and query
+parameters are searched in decoded form (URL-encoding and base64), whether or not `x` is on.
+
+| Term | Matches |
+|------|---------|
+| `token` | Regex anywhere: URL, headers, parameters, bodies |
+| `url:` / `host:` | Regex on the full URL / host name |
+| `header:` | Regex on request and response headers (`Name: value`) |
+| `param:` | Regex on decoded query parameters and form fields (`name=value`) |
+| `body:` | Regex on decoded request and response bodies |
+| `type:` | Regex on the response content type |
+| `method:POST` | Request method |
+| `status:404`, `status:4xx`, `status:>=500` | Status code, class or comparison |
+| `size:>100k`, `size:<=2mb` | Response size (decimal units) |
+| `dur:>500ms`, `dur:<2s` | Total request time |
+| `"a b"` | Quote terms that contain spaces |
+
+For example: `method:POST status:4xx`, `host:api !type:image`, `body:"invalid credentials"`.
 
 ## Installation
 

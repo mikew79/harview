@@ -1,4 +1,4 @@
-use crate::app::{self, Mode};
+use crate::app::{self, InputKind, MatchJump, Mode};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 #[derive(Debug, PartialEq)]
@@ -13,10 +13,26 @@ pub enum Command {
     PrevTab,
     TogglePretty,
     ToggleDecode,
+    StartInput(InputKind),
+    NextMatch,
+    PrevMatch,
+    ClearSearch,
+    InputChar(char),
+    InputBackspace,
+    InputDelete,
+    InputLeft,
+    InputRight,
+    InputHome,
+    InputEnd,
+    InputClear,
+    InputSubmit,
+    InputCancel,
 }
 
 impl Command {
     pub fn exec(&self, app: &mut app::App) {
+        // Messages are only shown until the next key press
+        app.message = None;
         match self {
             Self::Quit => app.quit(),
             Self::TableFocusTop => app.update_index_first(),
@@ -28,6 +44,20 @@ impl Command {
             Self::PrevTab => app.prev_tab(),
             Self::TogglePretty => app.toggle_pretty(),
             Self::ToggleDecode => app.toggle_decode(),
+            Self::StartInput(kind) => app.start_input(*kind),
+            Self::NextMatch => app.jump_to_match(MatchJump::Next),
+            Self::PrevMatch => app.jump_to_match(MatchJump::Prev),
+            Self::ClearSearch => app.clear_search(),
+            Self::InputChar(c) => app.input.insert(*c),
+            Self::InputBackspace => app.input.backspace(),
+            Self::InputDelete => app.input.delete(),
+            Self::InputLeft => app.input.left(),
+            Self::InputRight => app.input.right(),
+            Self::InputHome => app.input.home(),
+            Self::InputEnd => app.input.end(),
+            Self::InputClear => app.input.clear(),
+            Self::InputSubmit => app.submit_input(),
+            Self::InputCancel => app.cancel_input(),
         }
     }
 }
@@ -60,12 +90,59 @@ pub const KEY_HELP: &[(&str, &[(&str, &str)])] = &[
             ("x", "Toggle decoding: base64 bodies, URL / base64 form and query values"),
         ],
     ),
+    (
+        "Search",
+        &[
+            ("/", "Filter entries (query syntax below)"),
+            ("f", "Find in preview, without filtering"),
+            ("n / N", "Next / previous match in preview"),
+            ("Esc", "Clear find, then filter"),
+            ("Enter / Esc", "In the input bar: apply / cancel"),
+            ("Ctrl-U", "In the input bar: clear"),
+        ],
+    ),
+    (
+        "Query syntax (terms are ANDed, ! negates)",
+        &[
+            ("token", "Regex in URL, headers, params, bodies"),
+            ("url: host:", "Regex on the URL / host name"),
+            ("header:", "Regex on request / response headers"),
+            ("param:", "Regex on decoded query params / form fields"),
+            ("body:", "Regex on decoded request / response bodies"),
+            ("type:", "Regex on the response content type"),
+            ("method:POST", "Request method (exact)"),
+            ("status:", "404, 4xx, >=500"),
+            ("size:", ">100k, <=2mb (response size)"),
+            ("dur:", ">500ms, <2s (total time)"),
+            ("\"a b\"", "Quote terms containing spaces"),
+            ("Case", "Insensitive unless the pattern has uppercase"),
+        ],
+    ),
     ("General", &[("q / Ctrl-C", "Quit")]),
 ];
 
 pub fn handle_key_events(key_event: KeyEvent, mode: Mode) -> Option<Command> {
     match mode {
         Mode::Normal => normal_mode_keys(key_event),
+        Mode::Input(_) => input_mode_keys(key_event),
+    }
+}
+
+fn input_mode_keys(key_event: KeyEvent) -> Option<Command> {
+    let ctrl = key_event.modifiers.contains(KeyModifiers::CONTROL);
+    match key_event.code {
+        KeyCode::Char('c') if ctrl => Some(Command::Quit),
+        KeyCode::Char('u') if ctrl => Some(Command::InputClear),
+        KeyCode::Char(c) if !ctrl => Some(Command::InputChar(c)),
+        KeyCode::Backspace => Some(Command::InputBackspace),
+        KeyCode::Delete => Some(Command::InputDelete),
+        KeyCode::Left => Some(Command::InputLeft),
+        KeyCode::Right => Some(Command::InputRight),
+        KeyCode::Home => Some(Command::InputHome),
+        KeyCode::End => Some(Command::InputEnd),
+        KeyCode::Enter => Some(Command::InputSubmit),
+        KeyCode::Esc => Some(Command::InputCancel),
+        _ => None,
     }
 }
 
@@ -100,6 +177,11 @@ fn normal_mode_keys(key_event: KeyEvent) -> Option<Command> {
         KeyCode::BackTab => Some(Command::PrevTab),
         KeyCode::Char('p') => Some(Command::TogglePretty),
         KeyCode::Char('x') => Some(Command::ToggleDecode),
+        KeyCode::Char('/') => Some(Command::StartInput(InputKind::Filter)),
+        KeyCode::Char('f') => Some(Command::StartInput(InputKind::Find)),
+        KeyCode::Char('n') => Some(Command::NextMatch),
+        KeyCode::Char('N') => Some(Command::PrevMatch),
+        KeyCode::Esc => Some(Command::ClearSearch),
         _ => None,
     }
 }
@@ -147,6 +229,55 @@ mod tests {
         let command = handle_key_events(key(KeyCode::Char('p')), Mode::Normal);
 
         assert_eq!(command, Some(Command::TogglePretty));
+    }
+
+    const FILTER_INPUT: Mode = Mode::Input(InputKind::Filter);
+
+    #[test]
+    fn handle_key_events_slash_starts_filter_input() {
+        let command = handle_key_events(key(KeyCode::Char('/')), Mode::Normal);
+
+        assert_eq!(command, Some(Command::StartInput(InputKind::Filter)));
+    }
+
+    #[test]
+    fn handle_key_events_f_starts_find_input() {
+        let command = handle_key_events(key(KeyCode::Char('f')), Mode::Normal);
+
+        assert_eq!(command, Some(Command::StartInput(InputKind::Find)));
+    }
+
+    #[test]
+    fn handle_key_events_in_input_mode_types_normal_mode_keys() {
+        // `q` quits in normal mode but must be typeable in a query
+        let command = handle_key_events(key(KeyCode::Char('q')), FILTER_INPUT);
+
+        assert_eq!(command, Some(Command::InputChar('q')));
+    }
+
+    #[test]
+    fn handle_key_events_in_input_mode_types_shifted_characters() {
+        let shifted = KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT);
+
+        let command = handle_key_events(shifted, FILTER_INPUT);
+
+        assert_eq!(command, Some(Command::InputChar('N')));
+    }
+
+    #[test]
+    fn handle_key_events_in_input_mode_esc_cancels() {
+        let command = handle_key_events(key(KeyCode::Esc), FILTER_INPUT);
+
+        assert_eq!(command, Some(Command::InputCancel));
+    }
+
+    #[test]
+    fn handle_key_events_in_input_mode_ctrl_c_quits() {
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+
+        let command = handle_key_events(ctrl_c, FILTER_INPUT);
+
+        assert_eq!(command, Some(Command::Quit));
     }
 
     #[test]
