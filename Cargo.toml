@@ -4,6 +4,11 @@ version = "0.1.0"
 authors = ["sheepla", "Mike Wagstaffe"]
 license = "MIT"
 edition = "2021"
+# Highest minimum among the dependencies (`time`, `plist`); older toolchains get a clear error
+rust-version = "1.88"
+description = "HTTP Archive (HAR) viewer for the terminal"
+repository = "https://github.com/mikew79/harview"
+readme = "README.md"
 
 [dependencies]
 anyhow = "1.0.86"
