@@ -304,12 +304,28 @@ pub fn render_table(app: &mut App, area: Rect, buf: &mut Buffer) {
     StatefulWidget::render(table, area, buf, &mut app.table_state);
 }
 
+/// Previews kept for moving back to them; the text budget bounds memory with large bodies
+const RECENT_PREVIEWS: usize = 8;
+const RECENT_PREVIEWS_MAX_BYTES: usize = 16 * 1024 * 1024;
+
 /// Rebuilds the cached preview lines (with highlighting) when anything they depend on changed
 fn ensure_preview_cache(app: &mut App) {
     let key = app.preview_key();
     if app.preview_cache.as_ref().map(|cache| cache.key) == Some(key) {
         return;
     }
+    app.match_cursor = None;
+    if let Some(previous) = app.preview_cache.take() {
+        remember_preview(app, previous);
+    }
+    // Previews highlighted for an earlier search can never be shown again
+    app.recent_previews
+        .retain(|(_, cache)| cache.key.highlight_generation == key.highlight_generation);
+    if let Some(position) = app.recent_previews.iter().position(|(_, cache)| cache.key == key) {
+        app.preview_cache = app.recent_previews.remove(position).map(|(_, cache)| cache);
+        return;
+    }
+
     let lines = preview_lines(app, app.tabbar_state, app.body_options);
     let (lines, matches) = match app.highlight() {
         Some(regex) => highlight_lines(lines, regex),
@@ -328,34 +344,57 @@ fn ensure_preview_cache(app: &mut App) {
         match_elsewhere,
         layout: None,
     });
-    app.match_cursor = None;
+}
+
+fn remember_preview(app: &mut App, cache: PreviewCache) {
+    let bytes = cache.lines.iter().map(line_len).sum();
+    app.recent_previews.push_front((bytes, cache));
+    while app.recent_previews.len() > RECENT_PREVIEWS
+        || app.recent_previews.iter().map(|(bytes, _)| bytes).sum::<usize>()
+            > RECENT_PREVIEWS_MAX_BYTES
+    {
+        app.recent_previews.pop_back();
+    }
 }
 
 fn wrapped_layout(cache: &mut PreviewCache, width: u16) -> &WrappedLayout {
     if cache.layout.as_ref().map(|layout| layout.width) != Some(width) {
-        let mut starts = Vec::with_capacity(cache.lines.len() + 1);
-        let mut row = 0;
-        starts.push(row);
-        for line in &cache.lines {
-            row += wrapped_height(line, width);
-            starts.push(row);
-        }
-        cache.layout = Some(WrappedLayout { width, starts });
+        cache.layout = Some(build_layout(&cache.lines, width));
     }
     cache.layout.get_or_insert_with(|| unreachable!("layout just built"))
+}
+
+fn build_layout(lines: &[Line<'static>], width: u16) -> WrappedLayout {
+    let mut starts = Vec::with_capacity(lines.len() + 1);
+    let mut hard_rows = std::collections::HashMap::new();
+    let mut row = 0;
+    starts.push(row);
+    for (index, line) in lines.iter().enumerate() {
+        if is_hard_wrapped(line) {
+            let rows = hard_row_starts(line, width);
+            row += rows.len();
+            hard_rows.insert(index, rows);
+        } else {
+            row += wrapped_height(line, width);
+        }
+        starts.push(row);
+    }
+    WrappedLayout {
+        width,
+        starts,
+        hard_rows,
+    }
 }
 
 /// The lines needed to fill `height` rows from wrapped row `scroll`, and the row offset into
 /// the first of them; rendering just these avoids copying a whole huge body every frame
 fn visible_window(
     lines: &[Line<'static>],
-    starts: &[usize],
+    layout: &WrappedLayout,
     scroll: usize,
     height: usize,
-    width: u16,
 ) -> (Vec<Line<'static>>, u16) {
-    let width = width.max(1) as usize;
-    let line_starts = &starts[..lines.len()];
+    let line_starts = &layout.starts[..lines.len()];
     let first = line_starts
         .partition_point(|&start| start <= scroll)
         .saturating_sub(1);
@@ -366,13 +405,12 @@ fn visible_window(
     let mut paragraph_offset = 0;
     for (position, line) in lines.get(first..end.max(first)).unwrap_or_default().iter().enumerate() {
         let skip_rows = if position == 0 { offset } else { 0 };
-        if is_hard_wrapped(line) {
-            // Cut out just the visible rows, each exactly `width` bytes (ASCII) long
+        if let Some(rows) = layout.hard_rows.get(&(first + position)) {
+            // Cut out just the visible rows, each already measured to fit the width
             let len = line_len(line);
-            let rows = len.div_ceil(width);
-            let take = rows.saturating_sub(skip_rows).min(height);
+            let take = rows.len().saturating_sub(skip_rows).min(height);
             window.extend((skip_rows..skip_rows + take).map(|row| {
-                slice_line(line, row * width, ((row + 1) * width).min(len))
+                slice_line(line, rows[row], rows.get(row + 1).copied().unwrap_or(len))
             }));
         } else {
             if position == 0 {
@@ -384,10 +422,10 @@ fn visible_window(
     (window, paragraph_offset.min(u16::MAX as usize) as u16)
 }
 
-/// Lines at least this long that are plain ASCII (typically minified code) are wrapped at
-/// exactly the preview width rather than at word boundaries: their height is then simple
-/// arithmetic and only the visible rows are cut out. Word-wrapping a multi-megabyte minified
-/// line took ~175ms
+/// Lines at least this long (typically minified code) are wrapped at exactly the preview width,
+/// character by character, rather than at word boundaries: their rows are measured in one fast
+/// pass and only the visible ones are cut out. Word-wrapping a multi-megabyte minified line
+/// took ~175ms
 const HARD_WRAP_MIN_BYTES: usize = 10_000;
 
 fn line_len(line: &Line) -> usize {
@@ -395,7 +433,57 @@ fn line_len(line: &Line) -> usize {
 }
 
 fn is_hard_wrapped(line: &Line) -> bool {
-    line_len(line) >= HARD_WRAP_MIN_BYTES && line.spans.iter().all(|span| span.content.is_ascii())
+    line_len(line) >= HARD_WRAP_MIN_BYTES
+}
+
+/// Byte offset at which each row of a hard-wrapped `line` starts: a row ends before the
+/// character that would overflow `width` display columns (wide characters count as two)
+fn hard_row_starts(line: &Line, width: u16) -> Vec<usize> {
+    use unicode_width::UnicodeWidthChar;
+    let width = width.max(1) as usize;
+    let mut starts = vec![0];
+    let mut column = 0;
+    let mut offset = 0;
+    for span in &line.spans {
+        let text = span.content.as_ref();
+        let bytes = text.as_bytes();
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] < 0x80 {
+                // A run of ASCII (nearly all of minified code), one column per byte: place its
+                // row breaks arithmetically
+                let run = bytes[index..]
+                    .iter()
+                    .position(|&byte| byte >= 0x80)
+                    .unwrap_or(bytes.len() - index);
+                let mut position = offset + index;
+                let mut remaining = run;
+                loop {
+                    let space = width - column;
+                    if remaining <= space {
+                        column += remaining;
+                        break;
+                    }
+                    position += space;
+                    remaining -= space;
+                    starts.push(position);
+                    column = 0;
+                }
+                index += run;
+                continue;
+            }
+            let c = text[index..].chars().next().unwrap_or_default();
+            let (char_width, char_len) = (c.width().unwrap_or(0), c.len_utf8());
+            if column + char_width > width && column > 0 {
+                starts.push(offset + index);
+                column = 0;
+            }
+            column += char_width;
+            index += char_len;
+        }
+        offset += bytes.len();
+    }
+    starts
 }
 
 /// Bytes `start..end` of `line`, keeping the span styles
@@ -448,20 +536,13 @@ pub fn render_preview(app: &mut App, area: Rect, buf: &mut Buffer) {
             // scrollable. Clamp here too so scrolling back up responds immediately after
             // overshooting.
             wrapped_layout(cache, inner.width);
-            let starts = cache
-                .layout
-                .as_ref()
-                .map_or(&[0][..], |layout| layout.starts.as_slice());
-            let total = starts.last().copied().unwrap_or(0);
+            let PreviewCache { lines, layout, .. } = cache;
+            let layout = layout.as_ref().expect("layout just built");
+            let total = layout.starts.last().copied().unwrap_or(0);
             let max_scroll = total.saturating_sub(height).min(u16::MAX as usize) as u16;
             app.preview_scroll = app.preview_scroll.min(max_scroll);
-            let (window, offset) = visible_window(
-                &cache.lines,
-                starts,
-                app.preview_scroll as usize,
-                height,
-                inner.width,
-            );
+            let (window, offset) =
+                visible_window(lines, layout, app.preview_scroll as usize, height);
             (window, offset, total)
         }
         None => (Vec::new(), 0, 0),
@@ -528,8 +609,16 @@ fn resolve_match_jump(app: &mut App, jump: MatchJump, width: u16) {
 
     if let Some(cache) = app.preview_cache.as_mut() {
         let (line, match_end) = cache.matches[cursor];
-        let line_start = wrapped_layout(cache, width).starts[line];
-        let row = match_row(&cache.lines[line], line_start, match_end, width);
+        wrapped_layout(cache, width);
+        let PreviewCache { lines, layout, .. } = &*cache;
+        let layout = layout.as_ref().expect("layout just built");
+        let row = match_row(
+            &lines[line],
+            layout.hard_rows.get(&line),
+            layout.starts[line],
+            match_end,
+            width,
+        );
         app.preview_scroll = row
             .saturating_sub(MATCH_CONTEXT_ROWS)
             .min(u16::MAX as usize) as u16;
@@ -554,11 +643,9 @@ fn first_other_tab_with_match(app: &App) -> Option<TabBarState> {
         })
 }
 
+/// Rows `line` takes when word-wrapped (lines that aren't hard-wrapped)
 fn wrapped_height(line: &Line<'static>, width: u16) -> usize {
     let width = width.max(1);
-    if is_hard_wrapped(line) {
-        return line_len(line).div_ceil(width as usize).max(1);
-    }
     // Most lines fit, and measuring is much cheaper than wrapping a copy
     if line.width() <= width as usize {
         return 1;
@@ -572,9 +659,16 @@ fn wrapped_height(line: &Line<'static>, width: u16) -> usize {
 /// Row on which a match ending at byte `match_end` of `line` (starting on row `line_start`) is
 /// shown. Wrapping the text up to the match end approximates the full line's wrapping (it can
 /// be one row early), which the context rows kept above a match absorb
-fn match_row(line: &Line<'static>, line_start: usize, match_end: usize, width: u16) -> usize {
-    if is_hard_wrapped(line) {
-        return line_start + match_end.saturating_sub(1) / width.max(1) as usize;
+fn match_row(
+    line: &Line<'static>,
+    hard_rows: Option<&Vec<usize>>,
+    line_start: usize,
+    match_end: usize,
+    width: u16,
+) -> usize {
+    if let Some(rows) = hard_rows {
+        let last_byte = match_end.saturating_sub(1);
+        return line_start + rows.partition_point(|&start| start <= last_byte).saturating_sub(1);
     }
     let text = line_text(line);
     let prefix = text.get(..match_end).unwrap_or(&text).to_string();
@@ -1028,6 +1122,88 @@ fn binary_lines(bytes: &[u8]) -> Vec<Line<'static>> {
 mod tests {
     use super::*;
 
+    fn app_from_fixture() -> App {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sample.har");
+        let har = serde_json::from_str(&std::fs::read_to_string(path).expect("fixture"))
+            .expect("valid HAR");
+        App::init(har, "sample.har".to_string())
+    }
+
+    /// Builds the preview, then tags it so a reused copy can be told from a rebuilt one
+    fn show_and_tag(app: &mut App, tag: &str) {
+        ensure_preview_cache(app);
+        app.preview_cache.as_mut().expect("built").lines.push(Line::from(tag.to_string()));
+    }
+
+    fn current_tag(app: &App) -> Option<String> {
+        app.preview_cache
+            .as_ref()
+            .and_then(|cache| cache.lines.last())
+            .map(line_text)
+    }
+
+    #[test]
+    fn ensure_preview_cache_reuses_a_recent_preview_when_moving_back() {
+        let mut app = app_from_fixture();
+        show_and_tag(&mut app, "first");
+        app.update_index(1);
+        show_and_tag(&mut app, "second");
+
+        app.update_index(-1);
+        ensure_preview_cache(&mut app);
+
+        assert_eq!(
+            (current_tag(&app).as_deref(), app.recent_previews.len()),
+            (Some("first"), 1)
+        );
+    }
+
+    #[test]
+    fn ensure_preview_cache_drops_previews_from_an_earlier_search() {
+        let mut app = app_from_fixture();
+        show_and_tag(&mut app, "first");
+        app.update_index(1);
+        ensure_preview_cache(&mut app);
+        app.apply_find("json").expect("find");
+
+        app.update_index(-1);
+        ensure_preview_cache(&mut app);
+
+        assert_ne!(current_tag(&app).as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn remember_preview_keeps_a_bounded_number_most_recent_first() {
+        let mut app = app_from_fixture();
+        for entry in 0..RECENT_PREVIEWS + 2 {
+            let mut cache = cache_with(vec![Line::from("x")]);
+            cache.key.entry = Some(entry);
+            remember_preview(&mut app, cache);
+        }
+
+        let kept: Vec<_> = app.recent_previews.iter().map(|(_, cache)| cache.key.entry).collect();
+
+        assert_eq!(
+            (kept.len(), kept.first().copied().flatten(), kept.last().copied().flatten()),
+            (RECENT_PREVIEWS, Some(RECENT_PREVIEWS + 1), Some(2))
+        );
+    }
+
+    #[test]
+    fn remember_preview_evicts_oldest_beyond_the_byte_budget() {
+        let mut app = app_from_fixture();
+        let big = "a".repeat(RECENT_PREVIEWS_MAX_BYTES / 2);
+        for entry in 0..3 {
+            let mut cache = cache_with(vec![Line::from(big.clone())]);
+            cache.key.entry = Some(entry);
+            remember_preview(&mut app, cache);
+        }
+
+        let kept: Vec<_> = app.recent_previews.iter().map(|(_, cache)| cache.key.entry).collect();
+
+        assert_eq!(kept, vec![Some(2), Some(1)]);
+    }
+
     fn spans(line: &Line) -> Vec<(String, bool)> {
         line.spans
             .iter()
@@ -1136,7 +1312,7 @@ mod tests {
         // rows 1-5 at width 5, `tgt` on row 5
         let line = Line::from("aaaa bbbb cccc dddd tgt");
 
-        assert_eq!(match_row(&line, 1, 23, 5), 5);
+        assert_eq!(match_row(&line, None, 1, 23, 5), 5);
     }
 
     #[test]
@@ -1165,9 +1341,13 @@ mod tests {
     #[test]
     fn visible_window_starts_inside_a_wrapped_line() {
         let lines: Vec<Line<'static>> = ["a", "b", "c", "d"].map(Line::from).to_vec();
-        let starts = [0, 1, 4, 5, 6]; // line b wraps to 3 rows
+        let layout = WrappedLayout {
+            width: 80,
+            starts: vec![0, 1, 4, 5, 6], // line b wraps to 3 rows
+            hard_rows: Default::default(),
+        };
 
-        let (window, offset) = visible_window(&lines, &starts, 2, 3, 80);
+        let (window, offset) = visible_window(&lines, &layout, 2, 3);
 
         // rows 2..5: the rest of b (offset 1 into it), then c
         assert_eq!(
@@ -1185,12 +1365,14 @@ mod tests {
     }
 
     #[test]
-    fn wrapped_height_long_ascii_line_is_hard_wrapped() {
-        assert_eq!(wrapped_height(&long_ascii_line(), 100), 250);
+    fn build_layout_long_ascii_line_is_hard_wrapped() {
+        let layout = build_layout(&[long_ascii_line()], 100);
+
+        assert_eq!(layout.starts, vec![0, 250]);
     }
 
     #[test]
-    fn is_hard_wrapped_needs_long_ascii_text() {
+    fn is_hard_wrapped_needs_long_text_of_any_kind() {
         let long_unicode = Line::from("é".repeat(HARD_WRAP_MIN_BYTES));
 
         assert_eq!(
@@ -1199,17 +1381,48 @@ mod tests {
                 is_hard_wrapped(&Line::from("short")),
                 is_hard_wrapped(&long_unicode)
             ),
-            (true, false, false)
+            (true, false, true)
+        );
+    }
+
+    #[test]
+    fn hard_row_starts_counts_columns_not_bytes() {
+        // "é" is 2 bytes, 1 column; "日" is 3 bytes, 2 columns and can't be split across rows
+        let line = Line::from(vec![Span::raw("aéé"), Span::raw("日日b")]);
+
+        assert_eq!(hard_row_starts(&line, 4), vec![0, 5, 11]);
+    }
+
+    #[test]
+    fn hard_wrapped_unicode_rows_fit_the_width() {
+        let line = Line::from("ab日é".repeat(2_000)); // 9 bytes, 5 columns per repeat
+        let layout = build_layout(std::slice::from_ref(&line), 7);
+
+        let (window, _) = visible_window(std::slice::from_ref(&line), &layout, 0, 3);
+
+        assert_eq!(
+            (
+                layout.starts[1],
+                window.iter().map(|row| row.width()).collect::<Vec<_>>(),
+                window.iter().map(line_text).collect::<Vec<_>>(),
+            ),
+            (
+                // 10,000 columns would fill 1,429 rows of 7, but a wide character that doesn't fit
+                // in the last column moves to the next row
+                1_500,
+                vec![7, 7, 7],
+                vec!["ab日éab".to_string(), "日éab日".to_string(), "éab日éa".to_string()],
+            )
         );
     }
 
     #[test]
     fn visible_window_cuts_rows_out_of_hard_wrapped_line() {
         let lines = vec![Line::from("intro"), long_ascii_line()];
-        let starts = [0, 1, 251];
+        let layout = build_layout(&lines, 100);
 
         // rows 5..8 are rows 4..7 of the long line: bytes 400..700
-        let (window, offset) = visible_window(&lines, &starts, 5, 3, 100);
+        let (window, offset) = visible_window(&lines, &layout, 5, 3);
 
         assert_eq!(
             (
@@ -1232,12 +1445,23 @@ mod tests {
     #[test]
     fn match_row_in_hard_wrapped_line_is_exact() {
         // match ending at byte 450 is on row 4 of the line (bytes 400..500)
-        assert_eq!(match_row(&long_ascii_line(), 1, 450, 100), 5);
+        let rows = hard_row_starts(&long_ascii_line(), 100);
+
+        assert_eq!(match_row(&long_ascii_line(), Some(&rows), 1, 450, 100), 5);
+    }
+
+    #[test]
+    fn match_row_in_hard_wrapped_unicode_line_uses_row_offsets() {
+        // rows of 4 columns: "éééé" is 8 bytes, so byte 20 is in the third row
+        let line = Line::from("é".repeat(HARD_WRAP_MIN_BYTES));
+        let rows = hard_row_starts(&line, 4);
+
+        assert_eq!(match_row(&line, Some(&rows), 10, 20, 4), 12);
     }
 
     #[test]
     fn visible_window_of_empty_preview_is_empty() {
-        let (window, offset) = visible_window(&[], &[0], 0, 10, 80);
+        let (window, offset) = visible_window(&[], &build_layout(&[], 80), 0, 10);
 
         assert_eq!((window.len(), offset), (0, 0));
     }
