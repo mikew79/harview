@@ -16,7 +16,7 @@ against the synthetic fixtures in `tests/fixtures/`. Tick items off in the same 
 | Export targets | File in `./exports/` (git-ignored) **and** clipboard via OSC 52. |
 | External viewer | Won't do (see the end of this file): export (phase 5) covers the need without handing the terminal to another program. |
 | curl export | The bash script puts credentials in variables (captured value, overridable from the environment); the clipboard command keeps them inline like DevTools. Bash / POSIX shells only. The `d` decode toggle doesn't apply: the request is replayed exactly as captured. |
-| Next phases | Agreed order: 7 deflate decoding (`SAMLRequest`), 8 copy as curl / bash script, 9 faster moves with a filter active. The SAML inspector stays in the backlog until it's scheduled. |
+| Next phases | Phases 7 (deflate decoding), 8 (copy as curl / bash script) and 9 (faster filtered moves) are done, in the agreed order. The SAML inspector stays in the backlog until it's scheduled. |
 | Syntax highlighting limit | Per language, to keep the UI responsive: JSON / XML up to 200KB, JavaScript / CSS / HTML up to 32KB (syntect's JS-family grammars cost ~3µs per byte, so 200KB of JS blocked for ~0.6s). Larger bodies are shown plain with a note; export them to view elsewhere. |
 
 ## Key bindings
@@ -173,7 +173,7 @@ Ideas that came up during development. Not scheduled into a phase yet.
 - [ ] **SAML inspector.** Searching decoded SAML already works: `/param:claims/emailaddress\b` finds logins whose `SAMLResponse` carries that claim (and confirmed one was missing in a real capture, the cause of a bug), and `x` + `n` jump to the `<Attribute>` line. But it's text matching, and the values have to be read from the XML. A SAML-aware view would add:
   - a `claim:` query term matching attribute *names* only, e.g. `/claim:emailaddress`
   - a claims summary above the decoded XML: NameID and its format, Issuer, Audience, validity window (`NotBefore` / `NotOnOrAfter`), signed / encrypted, then each attribute name → values
-  - works for `SAMLRequest` too once phase 7 is in
+  - works for `SAMLRequest` too (inflated since phase 7)
 
 ## Won't do
 
