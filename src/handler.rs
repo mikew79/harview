@@ -141,10 +141,11 @@ pub const KEY_HELP: &[(&str, &[(&str, &str)])] = &[
     (
         "Export",
         &[
-            ("e", "Export menu: request / response body, full request / response"),
-            ("1 - 4, j / k", "In the menu: choose what to export"),
+            ("e", "Export menu: request / response body, full request / response, curl"),
+            ("1 - 5, j / k", "In the menu: choose what to export"),
             ("d", "In the menu: decoded (as previewed) or as stored in the HAR"),
             ("Enter / f", "In the menu: save to a file (default under exports/)"),
+            ("", "curl saves a bash script; credentials become variables at its top"),
             ("c", "In the menu: copy to the clipboard (OSC 52, up to 100KB)"),
         ],
     ),
@@ -169,7 +170,7 @@ fn export_menu_keys(key_event: KeyEvent) -> Option<Command> {
     let ctrl = key_event.modifiers.contains(KeyModifiers::CONTROL);
     match key_event.code {
         KeyCode::Char('c') if ctrl => Some(Command::Quit),
-        KeyCode::Char(digit @ '1'..='4') => {
+        KeyCode::Char(digit @ '1'..='5') => {
             let index = digit as usize - '1' as usize;
             Some(Command::ExportSelect(ExportTarget::ALL[index]))
         }
@@ -364,6 +365,13 @@ mod tests {
         let command = handle_key_events(key(KeyCode::Char('3')), Mode::ExportMenu);
 
         assert_eq!(command, Some(Command::ExportSelect(ExportTarget::FullRequest)));
+    }
+
+    #[test]
+    fn handle_key_events_in_export_menu_5_selects_curl() {
+        let command = handle_key_events(key(KeyCode::Char('5')), Mode::ExportMenu);
+
+        assert_eq!(command, Some(Command::ExportSelect(ExportTarget::Curl)));
     }
 
     #[test]

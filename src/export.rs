@@ -1,6 +1,7 @@
 //! Exporting a request or response to a file or the clipboard. Kept free of UI types.
 
 use crate::body::{self, Body, BodyOptions, Processed};
+use crate::curl;
 use crate::har::{Entry, Header};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -22,14 +23,17 @@ pub enum ExportTarget {
     FullRequest,
     /// Status line, headers and body as raw HTTP text
     FullResponse,
+    /// A `curl` command (clipboard) or bash script (file) that replays the request
+    Curl,
 }
 
 impl ExportTarget {
-    pub const ALL: [ExportTarget; 4] = [
+    pub const ALL: [ExportTarget; 5] = [
         Self::RequestBody,
         Self::ResponseBody,
         Self::FullRequest,
         Self::FullResponse,
+        Self::Curl,
     ];
 
     pub fn label(self) -> &'static str {
@@ -38,6 +42,7 @@ impl ExportTarget {
             Self::ResponseBody => "Response body",
             Self::FullRequest => "Full request",
             Self::FullResponse => "Full response",
+            Self::Curl => "curl command / bash script",
         }
     }
 
@@ -45,7 +50,7 @@ impl ExportTarget {
         match self {
             Self::RequestBody => "request-body",
             Self::ResponseBody => "response-body",
-            Self::FullRequest => "request",
+            Self::FullRequest | Self::Curl => "request",
             Self::FullResponse => "response",
         }
     }
@@ -58,7 +63,7 @@ pub struct Exported {
     pub binary: bool,
 }
 
-/// Builds the content to export. `decoded` applies the pipeline (decoding, and pretty printing
+/// Builds the content to export (for `Curl`, the plain command; a file gets [`curl::script`]). `decoded` applies the pipeline (decoding, and pretty printing
 /// when `pretty`) as the preview does; otherwise bodies are exactly as stored in the HAR
 pub fn build(
     entry: &Entry,
@@ -112,6 +117,7 @@ pub fn build(
             let body = response_body(entry, decoded, options).ok();
             Ok(join(head, body))
         }
+        ExportTarget::Curl => curl::command(entry).map(text),
     }
 }
 
@@ -250,6 +256,7 @@ pub fn default_path(number: usize, entry: &Entry, target: ExportTarget, decoded:
 
     let extension = match target {
         ExportTarget::FullRequest | ExportTarget::FullResponse => "http",
+        ExportTarget::Curl => "sh",
         ExportTarget::RequestBody => entry
             .request
             .post_data
@@ -334,6 +341,16 @@ fn sanitize(part: &str) -> String {
 /// exports often contain cookies and tokens. Refuses to replace an existing file unless
 /// `overwrite`
 pub fn write_file(path: &Path, bytes: &[u8], overwrite: bool) -> std::io::Result<()> {
+    write_file_with_mode(path, bytes, overwrite, 0o600)
+}
+
+/// As [`write_file`], also executable by the owner
+pub fn write_script(path: &Path, bytes: &[u8], overwrite: bool) -> std::io::Result<()> {
+    write_file_with_mode(path, bytes, overwrite, 0o700)
+}
+
+#[cfg_attr(not(unix), allow(unused_variables))]
+fn write_file_with_mode(path: &Path, bytes: &[u8], overwrite: bool, mode: u32) -> std::io::Result<()> {
     if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
     }
@@ -347,9 +364,16 @@ pub fn write_file(path: &Path, bytes: &[u8], overwrite: bool) -> std::io::Result
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+        options.mode(mode);
     }
-    options.open(path)?.write_all(bytes)
+    let mut file = options.open(path)?;
+    // `mode` only applies to new files; an overwritten one gets it too
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+    }
+    file.write_all(bytes)
 }
 
 /// The OSC 52 escape sequence that asks the terminal to put `bytes` on the system clipboard
@@ -577,6 +601,20 @@ mod tests {
     }
 
     #[test]
+    fn build_curl_is_the_plain_command() {
+        let result = exported_text(LOGIN, ExportTarget::Curl, true);
+
+        assert!(result.starts_with("curl 'https://api.example.com/v2/login?next=%2Fhome' \\\n"));
+    }
+
+    #[test]
+    fn default_path_curl_is_a_shell_script() {
+        let path = default_path(12, &entry(LOGIN), ExportTarget::Curl, true);
+
+        assert_eq!(path, "exports/0012-api.example.com-login-request.sh");
+    }
+
+    #[test]
     fn osc52_encodes_text_as_base64() {
         let exported = Exported {
             bytes: b"hello".to_vec(),
@@ -635,5 +673,20 @@ mod tests {
         std::fs::remove_dir_all(&dir).expect("cleanup");
 
         assert_eq!(mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_script_is_executable_by_owner_only_even_when_overwriting() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("script");
+        let path = dir.join("replay.sh");
+
+        write_file(&path, b"old", false).expect("written");
+        write_script(&path, b"#!/usr/bin/env bash\n", true).expect("overwritten");
+        let mode = std::fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+
+        assert_eq!(mode, 0o700);
     }
 }

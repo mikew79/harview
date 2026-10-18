@@ -74,7 +74,9 @@ fn render_export_menu(app: &App, area: Rect, buf: &mut Buffer) {
             },
         ]));
     }
-    let body = if app.export.decoded {
+    let body = if app.export.target == ExportTarget::Curl {
+        "sent exactly as captured (d has no effect)"
+    } else if app.export.decoded {
         if app.body_options.pretty {
             "decoded and pretty printed, as previewed"
         } else {
@@ -83,6 +85,11 @@ fn render_export_menu(app: &App, area: Rect, buf: &mut Buffer) {
     } else {
         "exactly as stored in the HAR"
     };
+    let (save, copy) = if app.export.target == ExportTarget::Curl {
+        (" save bash script   ", " copy command   ")
+    } else {
+        (" save to file   ", " copy to clipboard   ")
+    };
     lines.extend([
         Line::default(),
         Line::from(vec![Span::raw("   "), key("d"), Span::raw(format!(" Body: {}", body))]),
@@ -90,9 +97,9 @@ fn render_export_menu(app: &App, area: Rect, buf: &mut Buffer) {
         Line::from(vec![
             Span::raw("   "),
             key("Enter"),
-            Span::raw(" save to file   "),
+            Span::raw(save),
             key("c"),
-            Span::raw(" copy to clipboard   "),
+            Span::raw(copy),
             key("Esc"),
             Span::raw(" cancel"),
         ]),

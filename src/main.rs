@@ -1,5 +1,6 @@
 mod app;
 mod body;
+mod curl;
 mod event;
 mod export;
 mod handler;
