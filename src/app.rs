@@ -1,4 +1,5 @@
 use crate::body::BodyOptions;
+use crate::curl;
 use crate::export::{self, ExportTarget};
 use crate::search::{self, EntryText, Query};
 use mime;
@@ -434,12 +435,20 @@ impl App {
         if path.is_empty() {
             return Err("enter a file name".to_string());
         }
-        let exported = self.build_export()?;
         let overwrite = self.export.overwrite_path.as_deref() == Some(path);
-        match export::write_file(std::path::Path::new(path), &exported.bytes, overwrite) {
-            Ok(()) => {
+        let saved = if self.export.target == ExportTarget::Curl {
+            self.save_script(path, overwrite)?
+        } else {
+            self.build_export().map(|exported| {
+                let size = exported.bytes.len();
+                export::write_file(std::path::Path::new(path), &exported.bytes, overwrite)
+                    .map(|()| format!("saved {} ({} bytes)", path, size))
+            })?
+        };
+        match saved {
+            Ok(message) => {
                 self.export.overwrite_path = None;
-                self.info(format!("saved {} ({} bytes)", path, exported.bytes.len()));
+                self.info(message);
                 Ok(())
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -448,6 +457,22 @@ impl App {
             }
             Err(error) => Err(format!("could not save {}: {}", path, error)),
         }
+    }
+
+    /// Writes the curl script, plus its body file when the body is too large to inline
+    fn save_script(&self, path: &str, overwrite: bool) -> Result<std::io::Result<String>, String> {
+        let index = self.selected_entry().ok_or("no entry selected")?;
+        let script = curl::script(&self.har.log.entries[index], index + 1, &self.source, path);
+        let path = std::path::Path::new(path);
+        let mut message = format!("saved {}", path.display());
+        if let Some(body_file) = &script.body_file {
+            let body_path = path.with_file_name(&body_file.name);
+            if let Err(error) = export::write_file(&body_path, &body_file.bytes, overwrite) {
+                return Ok(Err(error));
+            }
+            message.push_str(&format!(" and its body {}", body_path.display()));
+        }
+        Ok(export::write_script(path, script.text.as_bytes(), overwrite).map(|()| message))
     }
 
     /// Queues the export for the terminal's clipboard (OSC 52)
@@ -1137,7 +1162,7 @@ mod tests {
 
         assert_eq!(
             (wrapped_back, app.export.target),
-            (ExportTarget::FullResponse, ExportTarget::RequestBody)
+            (ExportTarget::Curl, ExportTarget::RequestBody)
         );
     }
 
@@ -1184,6 +1209,26 @@ mod tests {
         assert_eq!(
             (first.is_ok(), second.is_err(), third.is_ok()),
             (true, true, true)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_export_curl_writes_an_executable_script() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("harview-app-curl-{}", std::process::id()));
+        let path = dir.join("replay.sh").to_string_lossy().into_owned();
+        let mut app = app_from_fixture();
+        app.select_export_target(ExportTarget::Curl);
+
+        let result = app.save_export(&path);
+        let script = std::fs::read_to_string(&path).expect("written");
+        let mode = std::fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+
+        assert_eq!(
+            (result, script.starts_with("#!/usr/bin/env bash\n"), mode),
+            (Ok(()), true, 0o700)
         );
     }
 

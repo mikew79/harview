@@ -15,6 +15,7 @@ against the synthetic fixtures in `tests/fixtures/`. Tick items off in the same 
 | Search behaviour | An active search **filters** the table to matching entries and highlights matches in both panes. `Esc` clears it. |
 | Export targets | File in `./exports/` (git-ignored) **and** clipboard via OSC 52. |
 | External viewer | Won't do (see the end of this file): export (phase 5) covers the need without handing the terminal to another program. |
+| curl export | The bash script puts credentials in variables (captured value, overridable from the environment); the clipboard command keeps them inline like DevTools. Bash / POSIX shells only. The `d` decode toggle doesn't apply: the request is replayed exactly as captured. |
 | Next phases | Agreed order: 7 deflate decoding (`SAMLRequest`), 8 copy as curl / bash script, 9 faster moves with a filter active. The SAML inspector stays in the backlog until it's scheduled. |
 | Syntax highlighting limit | Per language, to keep the UI responsive: JSON / XML up to 200KB, JavaScript / CSS / HTML up to 32KB (syntect's JS-family grammars cost ~3µs per byte, so 200KB of JS blocked for ~0.6s). Larger bodies are shown plain with a note; export them to view elsewhere. |
 
@@ -146,14 +147,15 @@ The SAML HTTP-Redirect binding sends the AuthnRequest in the URL as `SAMLRequest
 
 Turn the selected request into a `curl` command, like the browser DevTools' "Copy as cURL", to replay or tweak it from a shell. A fifth export target, so it gets the clipboard and file destinations for free.
 
-- [ ] **Bash script as the main output**: an executable `.sh` file (e.g. `exports/0012-api.example.com-login-request.sh`) with `#!/usr/bin/env bash` and `set -euo pipefail`, the curl command one option per line, owner-only executable permissions (`0700`). Secrets become variables at the top (`TOKEN=...`, `COOKIE=...`) so they're easy to swap or read from the environment; a binary or large body sits next to the script as a file it references
-- [ ] The plain command is also available for the clipboard
-- [ ] Shell quoting: single-quote every argument (`'` becomes `'\''`); DevTools also offers Windows `cmd` / PowerShell variants, which quote differently
-- [ ] Method: `-X` only when curl wouldn't infer it (e.g. not for GET, or POST with a body)
-- [ ] Headers: drop HTTP/2 pseudo-headers (`:authority`, `:method`, ...) and `Content-Length`; turn `Accept-Encoding` into `--compressed`; optionally `--http2` from the HTTP version
-- [ ] Body: `--data-raw` for text; binary or very large bodies need `--data-binary @file`, which pairs with exporting the body to a file; `multipart/form-data` as `--form` fields
-- [ ] Secrets: the command carries cookies and `Authorization` headers; consider an option to leave them out (or replace them with placeholders) when sharing
-- [ ] Unit tests: quoting (incl. quotes, newlines, non-ASCII), method inference, header filtering, body variants, secrets as variables, script layout and permissions
+- [x] **Bash script as the main output** (`e` → `5` → `Enter`): an executable `.sh` file (e.g. `exports/0012-api.example.com-login-request.sh`, mode `0700`) with `#!/usr/bin/env bash`, `set -euo pipefail`, a comment naming the entry, HAR file and capture time, and the curl command one option per line. Arguments to the script are passed on to curl (`./script.sh -i`)
+- [x] Credentials become variables at the top, defaulting to the captured value and overridable from the environment (`COOKIE='...' ./script.sh`). Detected by header name (`cookie`, `auth`, `token`, `credential`, `secret`, `session`, `api-key`), since Chrome strips `Cookie` / `Authorization` from exported HARs but keeps headers such as `x-ms-refreshtokencredential`; repeated headers get `COOKIE_2`, ...
+- [x] The plain command (`c`), with credentials inline as DevTools does
+- [x] Shell quoting: `'...'` with `'` as `'\''`; ANSI-C `$'...'` when the text holds control characters (CRLFs in multipart bodies, tabs), with `!` as `\x21` so interactive bash can't history-expand it. Non-ASCII passes through
+- [x] Method: `-X` only when curl wouldn't infer it (GET with a body, POST without, anything else); `--head` for HEAD
+- [x] Headers: HTTP/2 pseudo-headers (`:authority`, ...) and `Content-Length` dropped, `Accept-Encoding` becomes `--compressed`, `Host` dropped when it matches the URL. `Content-Type` is added from `postData.mimeType` when no header carries it (otherwise curl labels the body as a form). No `--http2`: curl negotiates HTTP/2 itself, and not every build supports the flag
+- [x] Body: `--data-raw` inline; over 32KB, or with NUL bytes, it goes in a `.body` file next to the script, read with `--data-binary @file`. Multipart bodies are replayed as captured (with their boundary) rather than rebuilt as `--form` fields, since HARs rarely hold the uploaded files' content. The clipboard command refuses a NUL body
+- [x] Unit tests: quoting, method inference, header filtering, Content-Type, body file, credentials as variables, comment lines, permissions. Verified end to end: every entry of the fixture and five real captures replayed through a stub `curl` receives exactly the captured headers and body, including environment overrides
+- Not done: Windows `cmd` / PowerShell variants; an option to strip credentials. Note that the URL is replayed as parsed, so a few characters (e.g. `'` in a query) arrive percent-encoded
 
 ### Phase 9 — Faster moves with a filter active
 
