@@ -161,6 +161,9 @@ pub struct App {
     pub table_state: TableState,
     /// Preview lines for the current key, rebuilt only when the key changes
     pub preview_cache: Option<PreviewCache>,
+    /// Previews shown recently, most recent first, with their text size in bytes: moving back
+    /// to an entry (or tab) reuses them instead of decoding and highlighting the body again
+    pub recent_previews: std::collections::VecDeque<(usize, PreviewCache)>,
 }
 
 /// Everything the preview content depends on
@@ -191,6 +194,8 @@ pub struct PreviewCache {
 pub struct WrappedLayout {
     pub width: u16,
     pub starts: Vec<usize>,
+    /// For each hard-wrapped line (by index): the byte offset at which each of its rows starts
+    pub hard_rows: std::collections::HashMap<usize, Vec<usize>>,
 }
 
 impl App {
@@ -222,6 +227,7 @@ impl App {
             visible: (0..har.log.entries.len()).collect(),
             table_state: TableState::default().with_selected(Some(0)),
             preview_cache: None,
+            recent_previews: Default::default(),
             har: har,
         }
     }

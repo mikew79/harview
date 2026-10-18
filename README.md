@@ -258,8 +258,8 @@ Fixes to the original code:
 - **Scrollable preview** that accounts for line wrapping, so long single-line bodies (minified
   JS/CSS/HTML, JWTs) can be read to the end. The current position is shown in the preview border.
 - **Responsiveness:** table rows and preview content are built once and cached instead of being
-  rebuilt every frame, only the visible part of a long body is rendered, and the screen is not
-  redrawn on idle ticks.
+  rebuilt every frame, recently viewed previews are reused, only the visible part of a long body
+  is rendered, and the screen is not redrawn on idle ticks.
 - **Usability:** the table scroll position is kept, mouse capture is disabled so terminal text
   selection works, unknown sizes (`-1`) are shown as `-`, the terminal is always restored on exit
   (even after an error), and an empty HAR no longer crashes.

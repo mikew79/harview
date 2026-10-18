@@ -159,7 +159,12 @@ Turn the selected request into a `curl` command, like the browser DevTools' "Cop
 
 ### Phase 9 — Faster moves with a filter active
 
-- [ ] On a 19MB HAR, moving between filtered entries still costs ~25-30ms, mostly from running the search regex over every line of multi-megabyte bodies when the preview is rebuilt. Highlight only the visible window and count matches lazily; measure before and after on the real captures
+Measured first, by rendering the real UI (ratatui `TestBackend`, 200×50) for every move through a filtered list on the real captures. The guess above was wrong: the search regex costs ~0.1ms per move. The time went into measuring wrapped rows of long lines.
+
+- [x] **Hard-wrap long non-ASCII lines too.** Lines of 10KB or more were only hard-wrapped (row count by arithmetic) when pure ASCII; one non-ASCII character in a multi-megabyte minified bundle sent the whole line through ratatui's word wrapper just to count rows (~60ms for a 2MB line). Long lines are now wrapped by display column, with the byte offset of each row computed once per width (`WrappedLayout::hard_rows`): wide characters take two columns and never straddle rows. ASCII runs are placed arithmetically, so a 4.4MB bundle measures in ~2ms. Uses `unicode-width`, the version ratatui already depends on
+- [x] **Reuse recent previews.** The last 8 previews (up to 16MB of text) are kept, so moving back to an entry or tab doesn't decode, pretty print and syntax-highlight the body again. Previews from an earlier search are dropped, since their highlights are stale
+- [x] Results on the 20MB capture (Response tab, average / worst move): `login` 9.4 / 59ms → 2.6 / 14ms, `type:javascript` 14 / 60ms → 4.4 / 18ms, `status:2xx` 5.3 / 68ms → 1.4 / 11ms; moving back to a recent entry ~0.3-0.9ms. The remaining worst case is syntect highlighting JavaScript on first view (~3µs per byte, so ~10ms for a 3KB file)
+- Considered and not done: lowering the hard-wrap threshold (tried 1-4KB: ~0.2ms gain, at the cost of word wrapping for medium-length lines); highlighting only the visible window (highlighting is not the bottleneck)
 
 ## Backlog
 

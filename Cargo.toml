@@ -27,4 +27,6 @@ serde_derive = "1.0.203"
 serde_json = "1.0.117"
 syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }
 tokio = { version = "1.35.1", features = ["full"] }
+# Same version ratatui uses; measures characters when hard-wrapping long lines
+unicode-width = "0.1.13"
 url = "2.5.1"
